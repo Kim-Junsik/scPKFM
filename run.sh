@@ -10,7 +10,7 @@
 set -e
 
 # --------------------------------------------------------------------- EDIT
-TAG=koopman_endpoint3              # run directory is results/runs/${TAG}_f${FOLD}: the fold
+TAG=ep3_mmd0              # run directory is results/runs/${TAG}_f${FOLD}: the fold
                          # is appended automatically so a run can never be filed
                          # under the wrong one. Still change TAG for every
                          # experiment - scripts/train.py opens the directory with
@@ -65,7 +65,7 @@ RESID_STEPS=2            # RK4 steps for those two terms only; inference still u
                          # Endpoint gets the larger weight because 88 % of the
                          # signal this task is scored on is additive.
 
-INIT_VAE_FROM=
+INIT_VAE_FROM=results/runs/koopman_f1
                          # empty = train stage 1. Otherwise a finished run whose
                          # encoder to reuse, e.g. results/runs/koopman_affine_f1.
                          # Legitimate because stage 2 freezes the encoder, so the
