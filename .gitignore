@@ -8,12 +8,15 @@ __pycache__/
 .ipynb_checkpoints/
 
 # Training output: checkpoints run to ~30 MB each and every experiment writes one.
-results/
+# Anchored with a leading slash: an unanchored "results/" matches at EVERY depth,
+# so it would also hide a src/results/ if one is ever added. The unanchored form
+# of the rule below silently excluded all of src/data/ from the repository.
+/results/
 
 # Datasets and the caches built from them. norman.h5ad alone is 2.1 GB, and a
 # per-fold cache is ~137 MB; the strict split makes those fold-specific, so they
 # multiply. data_prepare.py rebuilds any of them from the raw file.
-data/
+/data/
 assets/*.h5ad
 
 # The KEGG snapshot the pathway mask is built from. Free for academic use, but
