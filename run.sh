@@ -86,12 +86,17 @@ INIT_VAE_FROM=${INIT_VAE_FROM:-results/runs/koopman_f1}
                          # silently wrong. train.py compares the settings that
                          # define the encoder and refuses on a mismatch.
 
-HIDDEN=${HIDDEN:-null}   # VAE encoder/decoder widths, JSON, e.g. [2048,1024].
-                         # null keeps the config default ([1024, 512]).
-COMPOSITION_HIDDEN=${COMPOSITION_HIDDEN:-null}
+HIDDEN=${HIDDEN:-}       # VAE encoder/decoder widths, JSON, e.g. [2048,1024].
+                         # EMPTY, not "null": these three reach --set through
+                         # ${VAR:+model.x=$VAR}, which fires on any NON-EMPTY
+                         # value. With "null" as the default they were always
+                         # forwarded, config._coerce turned it into None, and
+                         # every run died in build_backbone on latent_dim=None.
+                         # Empty keeps the config default ([1024, 512]).
+COMPOSITION_HIDDEN=${COMPOSITION_HIDDEN:-}
                          # width of phi and rho in the learned composition.
                          # null keeps 128.
-LATENT_DIM=${LATENT_DIM:-null}
+LATENT_DIM=${LATENT_DIM:-}
                          # null keeps 64. Raising it raises the AUTOENCODER
                          # CEILING - the score a perfect flow would get, which is
                          # L2 1.6262 at 64 on fold 1 - so it is the only knob here
