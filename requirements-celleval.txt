@@ -16,3 +16,13 @@
 # comparing across runs.
 
 cell-eval==0.5.42
+
+# pdex is pinned because cell-eval does not pin it, and 0.3.0 removed the entry
+# point cell_eval/_baseline.py imports at module load:
+#
+#   ImportError: cannot import name 'parallel_differential_expression' from 'pdex'
+#
+# So an unpinned install of cell-eval==0.5.42 is broken on any host that resolves
+# pdex after the 0.3.0 release - the pin is what makes the version above mean
+# anything. 0.1.28 is the version the reported table was measured with.
+pdex==0.1.28

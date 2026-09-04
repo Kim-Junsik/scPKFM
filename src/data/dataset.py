@@ -88,10 +88,14 @@ class ConditionSampler:
     """
 
     def __init__(self, data: PerturbationData, train_conditions: list[str],
-                 batch_size: int, rng: np.random.Generator):
+                 batch_size: int, rng: np.random.Generator,
+                 anchor: dict[str, np.ndarray] | None = None):
         self.data = data
         self.batch_size = batch_size
         self.rng = rng
+        # condition -> gene-space shift for the SOURCE of that condition's batch.
+        # Empty for the unanchored model; see eval.baselines.anchor_deltas.
+        self.anchor = anchor or {}
         naming = data.naming
         usable = [c for c in train_conditions
                   if c in data.rows and not naming.is_control(c)]
@@ -105,5 +109,12 @@ class ConditionSampler:
 
     def batch(self, condition: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         source = self.data.sample_control(self.batch_size, self.rng)
+        shift = self.anchor.get(condition)
+        if shift is not None:
+            # The additive part of this combination, handed over rather than
+            # learned. The coupling then matches an already-shifted population to
+            # the target, so the OT problem the field has to solve is the residual
+            # displacement and not the whole one.
+            source = source + shift.astype(source.dtype, copy=False)
         target = self.data.sample(condition, self.batch_size, self.rng)
         return source, target, self.data.encode_condition(condition)

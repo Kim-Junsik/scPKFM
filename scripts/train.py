@@ -73,7 +73,28 @@ def main() -> None:
 
     stats = baselines.ConditionMeans(data.x, _condition_vector(data), naming)
     train_conditions = baselines.training_conditions(stats, fold, method)
-    sampler = ConditionSampler(data, train_conditions, config["train"]["batch_size"], rng)
+    anchor_kind = config["model"].get("anchor", "none")
+    anchor = baselines.anchor_deltas(anchor_kind, stats, train_conditions,
+                                     list(stats.mean),
+                                     alpha=config["eval"]["ridge_alpha"])
+    sampler = ConditionSampler(data, train_conditions, config["train"]["batch_size"],
+                               rng, anchor=anchor)
+    if anchor_kind != "none":
+        # A combination with no shift would train unanchored while the field is in
+        # anchored mode - correction only, no additive part - so it would be asked
+        # to produce the whole displacement with the term that produces it removed.
+        # Under the additive split the count matches; anywhere it does not, the
+        # split cannot support anchoring and the run should not start.
+        doubles = [c for c in stats.mean if naming.is_double(c)]
+        missing = [c for c in doubles if c not in anchor]
+        log(f"anchor={anchor_kind}: {len(anchor)} of {len(doubles)} combinations "
+            f"have a shift")
+        if missing:
+            raise SystemExit(
+                f"model.anchor={anchor_kind!r} leaves {len(missing)} combinations "
+                f"without a shift, e.g. {missing[:3]}. Anchoring needs both singles "
+                f"of every combination to be training conditions, which holds in "
+                f"the additive split and not in combinations. Use anchor=none.")
     log(f"train conditions: {len(sampler.singles)} singles + {len(sampler.doubles)} doubles")
 
     # Every cell a model is allowed to see. Stage 1 and the latent standardisation
@@ -139,7 +160,9 @@ def main() -> None:
     log(f"\ntrained in {time.time() - started:.1f}s")
 
     log("\n=== evaluation (same protocol as the baselines) ===")
-    results = evaluate_model(vae, field, data, stats, [fold], method, config, rng)
+    field.anchor_table = anchor
+    results = evaluate_model(vae, field, data, stats, [fold], method, config, rng,
+                             anchor=anchor)
     for key, value in results.items():
         log(f"  {key:18s} {value}")
 

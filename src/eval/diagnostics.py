@@ -26,6 +26,7 @@ from ..data.dataset import PerturbationData
 from ..data import splits
 from ..models.backbones import build_backbone
 from ..models.flow import PKFMField, integrate
+from . import baselines
 from .baselines import ConditionMeans, training_conditions
 from .predict import _head_aux
 
@@ -88,6 +89,14 @@ def load_run(run_dir: str, device: str = "cpu"):
     vae.load_state_dict(checkpoint["vae"])
     field = PKFMField(config, data.n_perturbations, vae.latent_dim).to(device)
     field.load_state_dict(checkpoint["field"])
+    # Rebuilt rather than unpickled from the checkpoint: it is a function of the
+    # training conditions and the condition means, both of which this function has
+    # just reconstructed, and a stale table shipped alongside stale weights is the
+    # kind of mismatch that reads as a bad result instead of a bad load.
+    field.anchor_table = baselines.anchor_deltas(
+        config["model"].get("anchor", "none"), stats,
+        training_conditions(stats, fold, method),
+        list(stats.mean), alpha=config["eval"]["ridge_alpha"])
     vae.eval()
     field.eval()
     return config, data, stats, fold, vae, field
@@ -164,7 +173,13 @@ def measure_transport(vae, field, data, stats, conditions: list[str], config,
     for condition in conditions:
         if condition == data.control_condition or not stats.has(condition):
             continue
-        x0 = torch.as_tensor(_control_sample(data, n_cells, rng), device=device)
+        cells = _control_sample(data, n_cells, rng)
+        # Same shift predict_cells applies, so lat_ratio/gene_ratio describe the
+        # displacement this model actually produces rather than the anchor's.
+        shift = (getattr(field, "anchor_table", None) or {}).get(condition)
+        if shift is not None:
+            cells = cells + shift.astype(cells.dtype, copy=False)
+        x0 = torch.as_tensor(cells, device=device)
         z0, _ = vae.encode_z(x0)
 
         perturbations = [data.pert_index[g] for g in data.naming.genes(condition)]

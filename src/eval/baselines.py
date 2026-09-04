@@ -128,6 +128,57 @@ def fit_ridge_additive(stats: ConditionMeans, train_conditions: list[str],
     return {"w": coefficients, "index": index, "covered": covered}
 
 
+def anchor_deltas(kind: str, stats: ConditionMeans, train_conditions: list[str],
+                  conditions: list[str], alpha: float = 1.0) -> dict[str, np.ndarray]:
+    """condition -> the GENE-SPACE shift applied to a control cell before transport.
+
+    Only combinations get an entry. A single perturbation is what identifies u_a in
+    the first place, so shifting its source would leave v(z,t,{a}) = u_a supervising
+    nothing; `batch` and `predict_cells` both fall back to an unshifted control for
+    any condition missing from this table.
+
+    Everything here is fitted or read from `train_conditions`. `stats` holds the
+    mean of EVERY condition including the evaluated doubles - it has to, the metrics
+    are computed against them - so the discipline is which keys are read, and the
+    only ones read below are the singles and the ridge fit's own training rows.
+
+    Returns {} for kind == "none", which is what keeps the unanchored model exactly
+    unchanged rather than shifted by zero.
+    """
+    if kind == "none":
+        return {}
+    if kind not in ("additive", "ridge"):
+        raise ValueError(f"unknown anchor {kind!r}")
+
+    naming = stats.naming
+    trainable = set(train_conditions)
+    if kind == "ridge":
+        perturbations = sorted({g for c in train_conditions if not naming.is_control(c)
+                                for g in condition_genes(c, naming)})
+        fit = fit_ridge_additive(stats, train_conditions, perturbations, alpha=alpha)
+
+    table: dict[str, np.ndarray] = {}
+    for condition in conditions:
+        if not naming.is_double(condition):
+            continue
+        a_gene, b_gene = naming.genes(condition)
+        if kind == "additive":
+            single_a, single_b = stats.single_of(a_gene), stats.single_of(b_gene)
+            # A single that is not trainable would make the shift depend on a
+            # held-out condition. In the additive split this never fires; under
+            # combinations it fires for every evaluated double, which is the
+            # mechanical reason anchoring is an additive-split-only option.
+            if not all(c in trainable and stats.has(c) for c in (single_a, single_b)):
+                continue
+            table[condition] = stats.delta(single_a) + stats.delta(single_b)
+        else:
+            if a_gene not in fit["covered"] or b_gene not in fit["covered"]:
+                continue
+            table[condition] = (fit["w"][fit["index"][a_gene]]
+                                + fit["w"][fit["index"][b_gene]])
+    return table
+
+
 def fit_pairwise_ridge(stats: ConditionMeans, train_doubles: list[str],
                        available: set[str], alpha: float = 1.0) -> np.ndarray:
     """Per-gene ridge on two SYMMETRIC features of the single deltas.

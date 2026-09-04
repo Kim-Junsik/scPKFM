@@ -45,10 +45,30 @@ def autoencode(vae, cells: np.ndarray, device: str) -> np.ndarray:
 @torch.no_grad()
 def predict_cells(vae, field, control_cells: np.ndarray, condition: str,
                   pert_index: dict[str, int], n_steps: int,
-                  device: str) -> np.ndarray:
+                  device: str, anchor: dict | None = None) -> np.ndarray:
+    """`anchor` is the table from eval.baselines.anchor_deltas.
+
+    THE choke point for anchoring at inference: every scoring path in this
+    repository ends up here, so applying the shift once here is what keeps
+    training and inference building z0 the same way. A condition absent from the
+    table (every single, and every combination under anchor=none) transports the
+    raw control cells, unchanged.
+
+    Left None it falls back to `field.anchor_table`, which scripts/train.py and
+    diagnostics.load_run both attach. That fallback is the reason celleval.export,
+    diagnostics.measure_transport and eval_scdfm_style did not each need the table
+    threaded through their own signatures: forgetting to pass it at one of those
+    call sites would silently score an anchored model as if it were unanchored,
+    and the number would look like a training failure rather than a plumbing bug.
+    """
     vae.eval()
     field.eval()
+    if anchor is None:
+        anchor = getattr(field, "anchor_table", None)
     perturbations = [pert_index[g] for g in condition_genes(condition)]
+    shift = (anchor or {}).get(condition)
+    if shift is not None:
+        control_cells = control_cells + shift.astype(control_cells.dtype, copy=False)
     x0 = torch.as_tensor(control_cells, device=device)
     z0, _ = vae.encode_z(x0)
     z1 = integrate(field, z0, perturbations, n_steps)
@@ -56,7 +76,7 @@ def predict_cells(vae, field, control_cells: np.ndarray, condition: str,
 
 
 def evaluate_model(vae, field, data, stats, folds, method, config,
-                   rng: np.random.Generator) -> dict:
+                   rng: np.random.Generator, anchor: dict | None = None) -> dict:
     """Same protocol as scripts/run_baselines.py so the numbers are comparable."""
     from ..eval import baselines as baseline_module
 
@@ -80,7 +100,7 @@ def evaluate_model(vae, field, data, stats, folds, method, config,
                               size=min(n_gen, control_cells.shape[0]), replace=False)
             control_sample = control_cells[pick]
             predicted = predict_cells(vae, field, control_sample, double,
-                                      data.pert_index, n_steps, device)
+                                      data.pert_index, n_steps, device, anchor)
 
             m_hat = predicted.mean(axis=0)
             m_ab, m_a = stats.mean[double], stats.mean[single_a]

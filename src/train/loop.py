@@ -155,7 +155,24 @@ def latent_endpoint_targets(vae, data: PerturbationData, sampler: ConditionSampl
 
     control = means[data.control_condition]
     targets = {c: v for c, v in means.items() if c != data.control_condition}
-    return {"targets": targets, "control": control}
+    # Where each condition's endpoint integration STARTS. Anchored combinations
+    # start from the shifted control mean, exactly as predict_cells does; without
+    # this the term would supervise a trajectory the model never takes and would
+    # pull the field back into reproducing the additive part it no longer owns.
+    starts = {}
+    anchor = getattr(sampler, "anchor", None) or {}
+    if anchor:
+        shifted = [c for c in anchor if c in targets]
+        if shifted:
+            control_cells = data.cells(data.control_condition)
+            take = min(n_cells, control_cells.shape[0])
+            base = control_cells[:take]
+            for condition in shifted:
+                shift = anchor[condition].astype(base.dtype, copy=False)
+                with torch.no_grad():
+                    z, _ = vae.encode_z(torch.as_tensor(base + shift, device=device))
+                starts[condition] = z.mean(dim=0, keepdim=True)
+    return {"targets": targets, "control": control, "starts": starts}
 
 
 def composition_residual(field, z0: torch.Tensor, perturbations: list[int],
@@ -261,6 +278,7 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         log(f"  latent standardised: raw ||std|| {raw_norm:.4f} -> unit "
             f"(mean per-dim std was {mean_std:.5f})")
 
+    anchored = bool(getattr(sampler, "anchor", None))
     resid_weight = train_cfg.get("resid_weight", 0.0)
     mmd_weight = train_cfg.get("mmd_weight", 0.0)
     endpoint_weight = train_cfg.get("endpoint_weight", 0.0)
@@ -277,8 +295,15 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         log(f"  condition mean latents: {len(means)} conditions encoded in "
             f"{time.time() - started_targets:.1f}s")
 
+    if anchored:
+        log(f"  anchored: {len(sampler.anchor)} combinations start from a shifted "
+            f"control; the field carries the correction only")
+        if resid_weight > 0:
+            log("  [warn] resid_weight > 0 is ignored under an anchor "
+                "(see the composition residual comment in this file)")
+
     resid = None
-    if resid_weight > 0:
+    if resid_weight > 0 and not anchored:
         resid = latent_residual_targets(vae, data, sampler, device, means=means)
         sizes = [float(v.norm()) for v in resid["targets"].values()]
         log(f"  composition residual on: {len(sizes)} training doubles, "
@@ -373,7 +398,8 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
             # mean. One integration of one point, so the cost is `resid_steps`
             # RK4 steps rather than a batch-sized pass.
             if endpoint is not None and condition in endpoint["targets"]:
-                z_end = integrate(field, endpoint["control"], perturbations,
+                start = endpoint.get("starts", {}).get(condition, endpoint["control"])
+                z_end = integrate(field, start, perturbations,
                                   train_cfg["resid_steps"])
                 e_loss = torch.nn.functional.mse_loss(z_end,
                                                       endpoint["targets"][condition])
@@ -382,7 +408,13 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
 
             # The composition residual. Only doubles have one, and only the ones
             # whose singles both exist in the data - see latent_residual_targets.
-            if resid is not None and condition in resid["targets"]:
+            #
+            # Skipped under an anchor. Phi_ab - Phi_a - Phi_b + z0 assumes all
+            # three integrations share a z0; an anchored Phi_ab starts somewhere
+            # else, so the expression no longer denotes the composition residual.
+            # It is also redundant there - the anchored field IS the residual -
+            # which is why run.sh sets RESID_WEIGHT=0 alongside ANCHOR.
+            if resid is not None and not anchored and condition in resid["targets"]:
                 r_model = composition_residual(field, z0.mean(dim=0, keepdim=True),
                                                perturbations, train_cfg["resid_steps"])
                 r_loss = torch.nn.functional.mse_loss(r_model, resid["targets"][condition])

@@ -127,6 +127,27 @@ DEFAULTS: dict[str, Any] = {
         #           Starts exactly additive (rho's output layer is zero).
         "composition": "additive",  # additive | learned
         "composition_hidden": 128,
+        # Where the flow STARTS for a combination. none transports a control cell
+        # and the field must produce the whole displacement, 88 % of which is the
+        # additive part. The other two shift the control cell in GENE SPACE first,
+        # so the field only has to produce what additivity gets wrong - which is
+        # exactly what resid_R2 measures.
+        #
+        #   none      z0 = encode(x_ctrl)
+        #   additive  z0 = encode(x_ctrl + (m_A - m_ctrl) + (m_B - m_ctrl))
+        #   ridge     z0 = encode(x_ctrl + w_A + w_B)
+        #
+        # Both shifts are built from TRAINING conditions only: in the additive
+        # split every single is a training condition and ridge fits over the
+        # training conditions alone, so no evaluated double is read. Under the
+        # combinations split the singles of an evaluated double are held out and
+        # neither shift exists - anchoring is defined for the additive split only.
+        #
+        # ValueComposition's output layer starts at zero, so at step 0 the field
+        # is the zero field and the prediction IS the anchor: 0.000 resid_R2 for
+        # additive, 0.533 for ridge (fold 1). Losing to the baseline the anchor
+        # came from therefore requires getting WORSE than the starting point.
+        "anchor": "none",  # none | additive | ridge
         # --- Koopman latent dynamics ---
         # u_a(z,t) = s(t) * (A_a z + b_a): a linear ODE in the latent space,
         # one 64x64 operator per perturbation. Koopman in FORM only - the
@@ -285,6 +306,16 @@ def _coerce(text: str) -> Any:
     # None made that config crash after the run had already started.
     if lowered == "null":
         return None
+    # A bracketed value is JSON. model.hidden is a list, and without this it
+    # arrived as the STRING "[2048,1024]" and the first Linear was built from
+    # whatever len() of that string returned - a config error that only surfaced
+    # as a shape mismatch deep in stage 1.
+    if text[:1] in "[{":
+        import json
+        try:
+            return json.loads(text)
+        except ValueError:
+            return text
     if lowered in ("true", "false"):
         return lowered == "true"
     try:

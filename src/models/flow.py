@@ -130,6 +130,9 @@ class PKFMField(nn.Module):
                            else latent_dim)
         self.generator = build_generator(config, n_perturbations, self.latent_dim)
 
+        # With an anchor the source already carries sum_a u_a's displacement, so
+        # the field must NOT reproduce it - see model.anchor in config.py.
+        self.anchored = model_cfg.get("anchor", "none") != "none"
         self.composition_kind = model_cfg.get("composition", "additive")
         if self.composition_kind == "learned":
             self.compose = ValueComposition(self.latent_dim,
@@ -143,6 +146,19 @@ class PKFMField(nn.Module):
             return torch.zeros_like(z)
 
         per_perturbation = [self.generator(z, t, pert) for pert in perturbations]
+
+        # A combination under an anchor is the one case where sum_a u_a is dropped.
+        # Keeping it would apply the additive displacement twice: once in the
+        # anchored source, once here. What remains is the correction alone, which
+        # is the quantity the anchor exists to isolate.
+        if self.anchored and len(perturbations) >= 2:
+            if self.composition_kind != "learned":
+                raise ValueError("model.anchor needs composition=learned: with "
+                                 "composition=additive the anchored field has no "
+                                 "term left and every combination would predict "
+                                 "the anchor unchanged")
+            return self.compose(per_perturbation)
+
         velocity = per_perturbation[0]
         for single in per_perturbation[1:]:
             velocity = velocity + single
