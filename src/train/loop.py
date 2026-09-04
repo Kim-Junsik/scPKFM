@@ -15,6 +15,7 @@ belongs to the single-perturbation fields.
 
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -253,7 +254,15 @@ def train_stage1(vae, data: PerturbationData, config: dict, device: str,
 
 def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
                  config: dict, device: str, rng: np.random.Generator, log,
-                 rows_allowed: np.ndarray | None = None) -> None:
+                 rows_allowed: np.ndarray | None = None,
+                 run_dir: str | None = None) -> None:
+    """`run_dir` enables periodic checkpointing; None keeps the old behaviour.
+
+    Stage 2 is the long half - 600 epochs is on the order of a week - and the only
+    torch.save used to be the one after evaluation, so anything that ended a run
+    early (a kill, an OOM, a reboot) discarded every epoch of it AND the finished
+    stage 1 with it. train.stage2_save_every epochs bounds that loss.
+    """
     train_cfg = config["train"]
     parameters = list(field.parameters())
     if train_cfg["finetune_vae_in_stage2"]:
@@ -448,3 +457,13 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         log(f"  stage2 epoch {epoch + 1:3d}/{train_cfg['stage2_epochs']}  "
             f"[{phase:7s}] loss {total / max(count, 1):.5f}  "
             f"fm {total_match / max(count, 1):.5f}{extra}")
+
+        # Written to a DIFFERENT name than checkpoint.pt on purpose: run.sh treats
+        # checkpoint.pt as "this run finished" and refuses to start over one, so a
+        # mid-training file under that name would lock the tag out. Evaluate a
+        # partial run with --init-vae-from pointing here, or rename it by hand.
+        every = train_cfg.get("stage2_save_every", 0)
+        if run_dir and every and (epoch + 1) % every == 0:
+            torch.save({"vae": vae.state_dict(), "field": field.state_dict(),
+                        "config": config, "stage2_epoch": epoch + 1},
+                       os.path.join(run_dir, "checkpoint_partial.pt"))

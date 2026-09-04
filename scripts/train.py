@@ -146,6 +146,18 @@ def main() -> None:
     else:
         log("\n=== stage 1: autoencoding ===")
         train_stage1(vae, data, config, device, rng, log, allowed)
+        # Saved HERE, not only at the end. finetune_vae_in_stage2 is False, so
+        # the encoder is frozen from this point and these are the weights the
+        # final checkpoint would carry. Without it a run killed during stage 2 -
+        # which is days long - threw away a finished stage 1 too, and the next
+        # run had nothing to hand to --init-vae-from.
+        #
+        # A separate file rather than checkpoint.pt: run.sh refuses to start
+        # when checkpoint.pt exists, and a stage-1-only artifact is not a
+        # finished run.
+        torch.save({"vae": vae.state_dict(), "config": config},
+                   os.path.join(run_dir, "stage1.pt"))
+        log(f"  encoder saved -> {os.path.join(run_dir, 'stage1.pt')}")
 
     # Stage 2 starts from a known state whether or not stage 1 ran. Without this
     # the rng that stage 1 consumed would shift every minibatch, coupling, and
@@ -156,7 +168,8 @@ def main() -> None:
     sampler.rng = rng
 
     log("\n=== stage 2: latent flow matching ===")
-    train_stage2(vae, field, data, sampler, config, device, rng, log, allowed)
+    train_stage2(vae, field, data, sampler, config, device, rng, log, allowed,
+                 run_dir=run_dir)
     log(f"\ntrained in {time.time() - started:.1f}s")
 
     log("\n=== evaluation (same protocol as the baselines) ===")

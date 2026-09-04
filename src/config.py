@@ -289,6 +289,11 @@ DEFAULTS: dict[str, Any] = {
         # fine-tuned, but the reconstruction term bounds that drift, which is the
         # cheaper of the two problems.
         "latent_renorm_every": 0,
+        # Epochs between mid-training checkpoints, written as
+        # checkpoint_partial.pt. 0 disables. Stage 2 at 600 epochs runs for days
+        # and the only save used to be after evaluation, so a kill or an OOM
+        # discarded the whole run including a finished stage 1.
+        "stage2_save_every": 25,
         "n_integration_steps": 20,
         "grad_clip": 1.0,
         "device": "cuda",
