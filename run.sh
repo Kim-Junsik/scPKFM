@@ -42,7 +42,7 @@ STRICT_SPLIT=${STRICT_SPLIT:-true}        # exclude held-out conditions from the
                          # not do this, so it makes the problem strictly harder -
                          # state it as such rather than hiding it.
 
-BATCH=${BATCH:-256}
+BATCH=${BATCH:-1024}
 LR=${LR:-1e-3}
 STAGE1=30                # autoencoding epochs
 STAGE2=200               # flow-matching epochs
