@@ -104,6 +104,16 @@ LATENT_DIM=${LATENT_DIM:-}
                          # how close it gets. Needs a fresh stage 1: INIT_VAE_FROM
                          # must be empty or train.py refuses on the shape.
 
+SEED=${SEED:-0}          # train.seed. Stage 2 reseeds to SEED+1, so this moves
+                         # the field's initialisation, the minibatch order, the
+                         # OT coupling and the time samples together - one run
+                         # per seed is one draw from the training distribution.
+                         # Needed to read any comparison: changing generator_rank
+                         # changes the SHAPE of the randn that initialises V, so
+                         # every rank is also a different draw, and a difference
+                         # between two ranks means nothing until the spread ACROSS
+                         # seeds at one rank is known.
+
 GPU_NUM=${GPU_NUM:-0}    # which GPU this run trains on. Exported as
                          # CUDA_VISIBLE_DEVICES below, so the process sees that
                          # card as device 0 and train.device=cuda needs no change.
@@ -209,6 +219,7 @@ usage() {
 
     --gpu_num N            GPU to train on            (default 0)
     --tag NAME             run name prefix            (default ep3_mmd0)
+    --seed N               train.seed                 (default 0)
     --fold N               0-4                        (default 1)
 
     --anchor KIND          none | additive | ridge    (default none)
@@ -244,6 +255,7 @@ while [ $# -gt 0 ]; do
     --celleval)    CELLEVAL=1; shift ;;
     --no-celleval) CELLEVAL=0; shift ;;
     --gpu_num|--gpu)      GPU_NUM=$2; shift 2 ;;
+    --seed)               SEED=$2; shift 2 ;;
     --tag)                TAG=$2; shift 2 ;;
     --fold)               FOLD=$2; shift 2 ;;
     --anchor)             ANCHOR=$2; shift 2 ;;
@@ -277,6 +289,7 @@ CACHE=assets/norman_scanpy${N_HVG}_fold${FOLD}.h5ad
 echo "=== configuration ==="
 echo "  gpu       $GPU_NUM  (CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)"
 echo "  anchor    $ANCHOR"
+echo "  seed      $SEED"
 echo "  run=$RUN fold=$FOLD n_hvg=$N_HVG criterion=$HVG_CRITERION"
 echo "  batch=$BATCH lr=$LR stage1=$STAGE1 stage2=$STAGE2 warmup=$WARMUP"
 echo "  endpoint=$ENDPOINT_WEIGHT resid=$RESID_WEIGHT steps=$RESID_STEPS"
@@ -320,7 +333,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
     model.generator=$GENERATOR model.composition=$COMPOSITION \
     ${INIT_VAE_FROM:+train.init_vae_from=$INIT_VAE_FROM} \
     model.latent_readout=$LATENT_READOUT model.generator_rank=$GENERATOR_RANK \
-    model.anchor=$ANCHOR \
+    model.anchor=$ANCHOR train.seed=$SEED \
     ${HIDDEN:+model.hidden=$HIDDEN} \
     ${COMPOSITION_HIDDEN:+model.composition_hidden=$COMPOSITION_HIDDEN} \
     ${LATENT_DIM:+model.latent_dim=$LATENT_DIM} \
