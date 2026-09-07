@@ -187,6 +187,15 @@ def main() -> None:
                              "checkpoint, the data and the transport entirely")
     parser.add_argument("--celleval-python", default=None,
                         help="interpreter holding cell-eval, if not .env-celleval")
+    parser.add_argument("--gate", default=None,
+                        choices=["soft", "hard", "sample"],
+                        help="override model.hurdle_gate for this scoring only. "
+                             "The gate decides how the hurdle head realises the "
+                             "binary event at INFERENCE and appears in no training "
+                             "loss, so this re-reads the same weights rather than "
+                             "changing the model. Results go to celleval_<gate>/ "
+                             "so the two scorings of one run cannot overwrite each "
+                             "other; without it, celleval/ as usual.")
     parser.add_argument("--infer-top-gene", type=int, default=None,
                         help="score on scanpy-HVG genes of the test subset, as "
                              "scDFM does (their run.sh uses 1000). Without it the "
@@ -196,7 +205,8 @@ def main() -> None:
                              "condition, so the full export is slow to score")
     args = parser.parse_args()
 
-    out_dir = os.path.join(args.run_dir, "celleval")
+    out_dir = os.path.join(args.run_dir,
+                           "celleval" if not args.gate else f"celleval_{args.gate}")
     interpreter = None
     if not args.export_only:
         # Resolved and probed BEFORE the export, so a broken environment costs
@@ -219,6 +229,9 @@ def main() -> None:
 
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         config = checkpoint["config"]
+        if args.gate:
+            config["model"]["hurdle_gate"] = args.gate
+            print(f"hurdle gate overridden: {args.gate}")
         device = config["train"]["device"]
         if device == "cuda" and not torch.cuda.is_available():
             device = config["train"]["device"] = config["eval"]["device"] = "cpu"

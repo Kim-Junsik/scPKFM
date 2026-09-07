@@ -52,8 +52,15 @@ CELLEVAL = [
 NOT_COMPUTABLE = ["Pears_dhat", "Pears_dhat20"]
 
 
-def celleval_means(run_dir: str) -> dict[str, str] | None:
-    path = os.path.join(run_dir, "celleval", "agg_results.csv")
+def celleval_means(run_dir: str, gate: str | None = None) -> dict[str, str] | None:
+    """Reads the scoring produced under the SAME gate the L2 pass will use.
+
+    run_celleval.py writes to celleval_<gate>/ when given --gate, so mixing a
+    soft L2 with a sample cell-eval - five of the eight columns silently coming
+    from a different point estimate - is not expressible here.
+    """
+    folder = "celleval" if not gate else f"celleval_{gate}"
+    path = os.path.join(run_dir, folder, "agg_results.csv")
     if not os.path.exists(path):
         return None
     with open(path, newline="", encoding="utf-8") as handle:
@@ -63,7 +70,7 @@ def celleval_means(run_dir: str) -> dict[str, str] | None:
     return None
 
 
-def compute_l2(run_dir: str, device: str, n_cells: int,
+def compute_l2(run_dir: str, device: str, n_cells: int, gate: str | None = None,
                infer_top_gene: int | None = None) -> float:
     """Eq. (15) over the fold's test doubles - the same conditions resid_R2 uses.
 
@@ -71,7 +78,7 @@ def compute_l2(run_dir: str, device: str, n_cells: int,
     is the only way the L2 columns compare: theirs is 1,000 scanpy-HVG genes of
     the test subset, ours is every gene in the cache.
     """
-    config, data, stats, fold, vae, field = load_run(run_dir, device)
+    config, data, stats, fold, vae, field = load_run(run_dir, device, gate)
     rng = np.random.default_rng(config["eval"]["seed"])
     conditions = condition_groups(data, stats, fold, config["split"]["method"])
     genes = scdfm_eval_genes(data, fold, infer_top_gene) if infer_top_gene else None
@@ -91,6 +98,14 @@ def main() -> None:
     parser.add_argument("--infer-top-gene", type=int, default=None,
                         help="score L2 on scanpy-HVG genes of the test subset, as "
                              "scDFM does (their run.sh uses 1000)")
+    parser.add_argument("--gate", default=None,
+                        choices=["soft", "hard", "sample"],
+                        help="score under this hurdle gate instead of the one in "
+                             "the checkpoint. L2 is recomputed with it and the "
+                             "cell-eval columns are read from celleval_<gate>/, "
+                             "so all six columns come from one point estimate. "
+                             "Produce that folder first: "
+                             "run_celleval.py <run> --gate <gate> --profile full")
     parser.add_argument("--csv", default=None, help="also write the table here")
     args = parser.parse_args()
 
@@ -118,9 +133,10 @@ def main() -> None:
     table = []
     for run_dir in runs:
         name = os.path.basename(run_dir.rstrip("/\\"))
-        values = celleval_means(run_dir)
+        values = celleval_means(run_dir, args.gate)
         l2 = (float("nan") if args.no_l2 else
-              compute_l2(run_dir, args.device, args.n_cells, args.infer_top_gene))
+              compute_l2(run_dir, args.device, args.n_cells, args.gate,
+                         args.infer_top_gene))
 
         cells = [f"{l2:12.4f}" if np.isfinite(l2) else f"{'-':>12s}"]
         record = {"run": name, "L2": l2}

@@ -67,11 +67,18 @@ def _folds(config: dict, method: str) -> list:
     return _FOLDS[key]
 
 
-def load_run(run_dir: str, device: str = "cpu"):
+def load_run(run_dir: str, device: str = "cpu", gate: str | None = None):
     """Rebuild a finished run from its checkpoint.
 
     Defaults to cpu: these diagnostics are cheap, and the usual reason to run
     them is that a sweep is still occupying the gpu.
+
+    `gate` overrides model.hurdle_gate for THIS load only - the file is not
+    rewritten. The hurdle gate is a decision about how the binary event is
+    realised at inference (heads.py, point_estimate); it appears in no training
+    loss, so scoring a finished run under a different one is a re-read of the
+    same weights and not a different model. Passing it here is what removes the
+    need to copy a run directory and patch its checkpoint to compare gates.
 
     The returned data and stats are SHARED between calls. Nothing here writes to
     them, but a caller that wants to mutate them must copy first.
@@ -80,6 +87,8 @@ def load_run(run_dir: str, device: str = "cpu"):
                             map_location=device, weights_only=False)
     config = checkpoint["config"]
     config["train"]["device"] = config["eval"]["device"] = device
+    if gate:
+        config["model"]["hurdle_gate"] = gate
 
     data, stats = _dataset(config)
     method = config["split"]["method"]
