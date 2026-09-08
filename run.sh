@@ -48,6 +48,14 @@ STAGE1=30                # autoencoding epochs
 STAGE2=200               # flow-matching epochs
 WARMUP=${WARMUP:-60}                # singles-only epochs before combinations join
 
+STAGE1_LR=${STAGE1_LR:-null}
+                         # stage 1's learning rate. null follows --lr. Set both
+                         # when they differ: --lr applies to BOTH stages, so
+                         # lowering it for stage 2 also halves stage 1, and 30
+                         # epochs at half the rate leaves a worse encoder - which
+                         # raises the autoencoder ceiling and shows up as a worse
+                         # L2 that looks like a fold being hard.
+
 KL_WEIGHT=${KL_WEIGHT:-1e-3}
                          # stage 1's KL term. It buys a well-behaved latent at
                          # the cost of reconstruction, and reconstruction is the
@@ -269,6 +277,7 @@ usage() {
     --endpoint F           endpoint weight            (default 3)
     --resid F              composition residual       (default 5)
     --mmd F                MMD weight                 (default 0)
+    --stage1-lr F          stage-1 lr (null = --lr)
     --kl F                 stage-1 KL weight          (default 1e-3)
     --hurdle-bce F         gate BCE weight            (default 1.0)
 
@@ -308,6 +317,7 @@ while [ $# -gt 0 ]; do
     --endpoint)           ENDPOINT_WEIGHT=$2; shift 2 ;;
     --resid)              RESID_WEIGHT=$2; shift 2 ;;
     --mmd)                MMD_WEIGHT=$2; shift 2 ;;
+    --stage1-lr)          STAGE1_LR=$2; shift 2 ;;
     --kl)                 KL_WEIGHT=$2; shift 2 ;;
     --hurdle-bce)         HURDLE_BCE=$2; shift 2 ;;
     --hidden)             HIDDEN=$2; shift 2 ;;
@@ -404,6 +414,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
     train.endpoint_weight=$ENDPOINT_WEIGHT train.mmd_weight=$MMD_WEIGHT \
     train.resid_weight=$RESID_WEIGHT train.resid_steps=$RESID_STEPS \
     train.kl_weight=$KL_WEIGHT model.hurdle_bce_weight=$HURDLE_BCE \
+    train.stage1_lr=$STAGE1_LR \
     model.generator=$GENERATOR model.composition=$COMPOSITION \
     ${INIT_VAE_FROM:+train.init_vae_from=$INIT_VAE_FROM} \
     model.latent_readout=$LATENT_READOUT model.generator_rank=$GENERATOR_RANK \

@@ -198,6 +198,16 @@ DEFAULTS: dict[str, Any] = {
         "max_steps_per_epoch": 0,
         "lr": 1e-3,
         "weight_decay": 1e-5,
+        # Stage 1's learning rate, kept separate from stage 2's. One `lr` for
+        # both made the two stages impossible to vary independently, and the
+        # setting that scored best on fold 1 needs exactly that: stage 1 at 1e-3
+        # (30 epochs is too few to converge at half the rate) and stage 2 at
+        # 5e-4 (there is no schedule, so a large step keeps bouncing at the end).
+        # That run reached it by accident - it inherited an encoder trained at
+        # 1e-3 through init_vae_from - and reproducing it on another fold was
+        # not expressible until this existed.
+        # None follows train.lr, which is the old behaviour.
+        "stage1_lr": None,
         "kl_weight": 1e-3,
         # Whether stage 2 also trains the VAE. Named for the whole VAE, not just
         # the encoder: the decoder is frozen with it, and stage 2 runs the VAE in

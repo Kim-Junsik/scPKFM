@@ -212,7 +212,8 @@ def train_stage1(vae, data: PerturbationData, config: dict, device: str,
                  rng: np.random.Generator, log,
                  rows_allowed: np.ndarray | None = None) -> None:
     train_cfg = config["train"]
-    optimiser = torch.optim.AdamW(vae.parameters(), lr=train_cfg["lr"],
+    stage1_lr = train_cfg.get("stage1_lr") or train_cfg["lr"]
+    optimiser = torch.optim.AdamW(vae.parameters(), lr=stage1_lr,
                                   weight_decay=train_cfg["weight_decay"])
     # None keeps the old behaviour (every cell). Callers that care about leakage
     # pass the training rows; scripts/train.py does.
