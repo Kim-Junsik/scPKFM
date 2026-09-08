@@ -48,6 +48,21 @@ STAGE1=30                # autoencoding epochs
 STAGE2=200               # flow-matching epochs
 WARMUP=${WARMUP:-60}                # singles-only epochs before combinations join
 
+KL_WEIGHT=${KL_WEIGHT:-1e-3}
+                         # stage 1's KL term. It buys a well-behaved latent at
+                         # the cost of reconstruction, and reconstruction is the
+                         # larger half of the reported L2: a perfect flow still
+                         # scores 1.5176 on fold 1 because everything is decoded,
+                         # against 1.8745 for the model. A plain PCA to the same
+                         # 311 dimensions reaches 0.8826, so the autoencoder is
+                         # leaving 0.63 on the table somewhere, and this is one of
+                         # the three things that could be taking it (the others
+                         # being hurdle_bce_weight and mask_l1).
+
+HURDLE_BCE=${HURDLE_BCE:-1.0}
+                         # weight on the gate's BCE. Competes with the magnitude
+                         # for the same capacity.
+
 ENDPOINT_WEIGHT=${ENDPOINT_WEIGHT:-3}        # ||Phi_a(z_ctrl) - z_a||^2 over training conditions.
 RESID_WEIGHT=${RESID_WEIGHT:-5}           # ||(Phi_ab - Phi_a - Phi_b + z0) - r_true||^2.
 MMD_WEIGHT=${MMD_WEIGHT:-0}             # distribution-level term: MMD between the one-step
@@ -103,6 +118,22 @@ LATENT_DIM=${LATENT_DIM:-}
                          # that changes what the model could achieve rather than
                          # how close it gets. Needs a fresh stage 1: INIT_VAE_FROM
                          # must be empty or train.py refuses on the shape.
+
+DATASET=${DATASET:-norman}   # norman | combosciplex. Sets the raw file, the
+                             # cache name and where the split comes from, because
+                             # those three have to agree: combosciplex ships no
+                             # split pickle and carries obs['split'] per cell
+                             # instead, and a cache built for one dataset under
+                             # the other's name is the kind of mix-up that only
+                             # shows up as a bad score.
+
+METHOD=${METHOD:-additive}   # additive | combinations. Which holdout the fold
+                             # means. additive holds out COMBINATIONS and keeps
+                             # every single in training - Table 1's setting, and
+                             # the one the Additive baseline is defined under.
+                             # combinations additionally holds out the singles of
+                             # every evaluated double, which is Table 2's.
+                             # Norman only.
 
 SEED=${SEED:-0}          # train.seed. Stage 2 reseeds to SEED+1, so this moves
                          # the field's initialisation, the minibatch order, the
@@ -220,6 +251,8 @@ usage() {
     --gpu_num N            GPU to train on            (default 0)
     --tag NAME             run name prefix            (default ep3_mmd0)
     --seed N               train.seed                 (default 0)
+    --dataset NAME         norman | combosciplex
+    --method KIND          additive | combinations    (Norman only)
     --fold N               0-4                        (default 1)
 
     --anchor KIND          none | additive | ridge    (default none)
@@ -236,6 +269,8 @@ usage() {
     --endpoint F           endpoint weight            (default 3)
     --resid F              composition residual       (default 5)
     --mmd F                MMD weight                 (default 0)
+    --kl F                 stage-1 KL weight          (default 1e-3)
+    --hurdle-bce F         gate BCE weight            (default 1.0)
 
     --hidden JSON          VAE widths, e.g. [2048,1024]
     --composition-hidden N --latent-dim N
@@ -256,6 +291,8 @@ while [ $# -gt 0 ]; do
     --no-celleval) CELLEVAL=0; shift ;;
     --gpu_num|--gpu)      GPU_NUM=$2; shift 2 ;;
     --seed)               SEED=$2; shift 2 ;;
+    --dataset)            DATASET=$2; shift 2 ;;
+    --method)             METHOD=$2; shift 2 ;;
     --tag)                TAG=$2; shift 2 ;;
     --fold)               FOLD=$2; shift 2 ;;
     --anchor)             ANCHOR=$2; shift 2 ;;
@@ -271,6 +308,8 @@ while [ $# -gt 0 ]; do
     --endpoint)           ENDPOINT_WEIGHT=$2; shift 2 ;;
     --resid)              RESID_WEIGHT=$2; shift 2 ;;
     --mmd)                MMD_WEIGHT=$2; shift 2 ;;
+    --kl)                 KL_WEIGHT=$2; shift 2 ;;
+    --hurdle-bce)         HURDLE_BCE=$2; shift 2 ;;
     --hidden)             HIDDEN=$2; shift 2 ;;
     --composition-hidden) COMPOSITION_HIDDEN=$2; shift 2 ;;
     --latent-dim)         LATENT_DIM=$2; shift 2 ;;
@@ -283,13 +322,46 @@ done
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-$GPU_NUM}
 
-RUN=${TAG}_${GENERATOR}_${COMPOSITION}_f${FOLD}
-CACHE=assets/norman_scanpy${N_HVG}_fold${FOLD}.h5ad
+# The dataset, the split source and the cache name are derived together. Setting
+# them apart is how a cache built for one dataset ends up loaded under the other:
+# combosciplex ships no split pickle, so it needs split.source=obs_column, and it
+# has ONE fold - split.fold must stay 0.
+case "$DATASET" in
+  norman)
+    RAW=data/norman/norman.h5ad
+    SPLIT_ARGS="split.source=reference_pkl split.reference_pkl=data/norman/split_results.pkl split.method=$METHOD"
+    ;;
+  combosciplex)
+    RAW=data/combosciplex/combosciplex.h5ad
+    SPLIT_ARGS="split.source=obs_column split.obs_key=split split.obs_test_value=ood"
+    if [ "$FOLD" != "0" ]; then
+      echo "combosciplex has one fold; --fold must be 0 (got $FOLD)" >&2
+      exit 1
+    fi
+    ;;
+  *) echo "unknown --dataset $DATASET (norman | combosciplex)" >&2; exit 1 ;;
+esac
+
+# The dataset and the split method enter the run name only when they are NOT the
+# default, so every run made before they existed keeps the name it already has.
+# They have to enter it at all because additive and combinations are different
+# problems on the same fold, and combosciplex is a different dataset entirely -
+# filing any of those under one name mixes results that cannot be compared.
+SUFFIX=""
+[ "$DATASET" = "norman" ] || SUFFIX="${SUFFIX}_${DATASET}"
+[ "$METHOD" = "additive" ] || SUFFIX="${SUFFIX}_${METHOD}"
+RUN=${TAG}${SUFFIX}_${GENERATOR}_${COMPOSITION}_f${FOLD}
+
+# The cache is NOT named that way: it must differ whenever the gene selection
+# differs, and STRICT_SPLIT excludes the held-out conditions from HVG selection,
+# so additive and combinations pick different genes from the same fold.
+CACHE=assets/${DATASET}_scanpy${N_HVG}_${METHOD}_fold${FOLD}.h5ad
 
 echo "=== configuration ==="
 echo "  gpu       $GPU_NUM  (CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)"
 echo "  anchor    $ANCHOR"
 echo "  seed      $SEED"
+echo "  dataset   $DATASET  ($METHOD split)"
 echo "  run=$RUN fold=$FOLD n_hvg=$N_HVG criterion=$HVG_CRITERION"
 echo "  batch=$BATCH lr=$LR stage1=$STAGE1 stage2=$STAGE2 warmup=$WARMUP"
 echo "  endpoint=$ENDPOINT_WEIGHT resid=$RESID_WEIGHT steps=$RESID_STEPS"
@@ -313,8 +385,8 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
   if [ ! -f "$CACHE" ]; then
     echo "=== building $CACHE ==="
     python data_prepare.py --set data.n_hvg=$N_HVG \
-      data.hvg_criterion=$HVG_CRITERION data.cache_h5ad=$CACHE \
-      data.exclude_test_from_hvg=$STRICT_SPLIT split.fold=$FOLD
+      data.hvg_criterion=$HVG_CRITERION data.cache_h5ad=$CACHE data.raw_h5ad=$RAW \
+      data.exclude_test_from_hvg=$STRICT_SPLIT split.fold=$FOLD $SPLIT_ARGS
     echo ""
   else
     echo "using existing cache $CACHE"
@@ -323,13 +395,15 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
 
   echo "=== training $RUN ==="
   python scripts/train.py --tag "$RUN" --set \
-    data.cache_h5ad=$CACHE data.n_hvg=$N_HVG data.hvg_criterion=$HVG_CRITERION \
+    data.raw_h5ad=$RAW data.cache_h5ad=$CACHE data.n_hvg=$N_HVG \
+    data.hvg_criterion=$HVG_CRITERION $SPLIT_ARGS \
     split.fold=$FOLD \
     train.batch_size=$BATCH train.lr=$LR \
     train.stage1_epochs=$STAGE1 train.stage2_epochs=$STAGE2 \
     train.single_warmup_epochs=$WARMUP train.device=$DEVICE \
     train.endpoint_weight=$ENDPOINT_WEIGHT train.mmd_weight=$MMD_WEIGHT \
     train.resid_weight=$RESID_WEIGHT train.resid_steps=$RESID_STEPS \
+    train.kl_weight=$KL_WEIGHT model.hurdle_bce_weight=$HURDLE_BCE \
     model.generator=$GENERATOR model.composition=$COMPOSITION \
     ${INIT_VAE_FROM:+train.init_vae_from=$INIT_VAE_FROM} \
     model.latent_readout=$LATENT_READOUT model.generator_rank=$GENERATOR_RANK \

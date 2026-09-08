@@ -15,36 +15,28 @@
 set -x
 
 # ---------------------------------------------------------------- sample
-python scripts/run_celleval.py results/runs/pathway_affine_learned_f1 --profile full --infer-top-gene 1000
-python scripts/run_celleval.py results/runs/p_r32_affine_learned_f1   --profile full --infer-top-gene 1000
-python scripts/run_celleval.py results/runs/p_r64_affine_learned_f1   --profile full --infer-top-gene 1000
-python scripts/run_celleval.py results/runs/p_r96_affine_learned_f1   --profile full --infer-top-gene 1000
-python scripts/run_celleval.py results/runs/p_r128_affine_learned_f1  --profile full --infer-top-gene 1000
-python scripts/run_celleval.py results/runs/p_rfull_affine_learned_f1 --profile full --infer-top-gene 1000
+python scripts/run_celleval.py results/runs/p_r32_sd1_affine_learned_f1 --profile full --infer-top-gene 1000
+python scripts/run_celleval.py results/runs/p_r32_sd2_affine_learned_f1   --profile full --infer-top-gene 1000
+python scripts/run_celleval.py results/runs/p_r64_sd1_affine_learned_f1   --profile full --infer-top-gene 1000
+python scripts/run_celleval.py results/runs/p_r64_sd2_affine_learned_f1   --profile full --infer-top-gene 1000
 
 # ------------------------------------------------------------------ soft
-python scripts/run_celleval.py results/runs/pathway_affine_learned_f1 --gate soft --profile full --infer-top-gene 1000
-python scripts/run_celleval.py results/runs/p_r32_affine_learned_f1   --gate soft --profile full --infer-top-gene 1000
-python scripts/run_celleval.py results/runs/p_r64_affine_learned_f1   --gate soft --profile full --infer-top-gene 1000
-python scripts/run_celleval.py results/runs/p_r96_affine_learned_f1   --gate soft --profile full --infer-top-gene 1000
-python scripts/run_celleval.py results/runs/p_r128_affine_learned_f1  --gate soft --profile full --infer-top-gene 1000
-python scripts/run_celleval.py results/runs/p_rfull_affine_learned_f1 --gate soft --profile full --infer-top-gene 1000
+python scripts/run_celleval.py results/runs/p_r32_sd1_affine_learned_f1 --gate soft --profile full --infer-top-gene 1000
+python scripts/run_celleval.py results/runs/p_r32_sd2_affine_learned_f1   --gate soft --profile full --infer-top-gene 1000
+python scripts/run_celleval.py results/runs/p_r64_sd1_affine_learned_f1   --gate soft --profile full --infer-top-gene 1000
+python scripts/run_celleval.py results/runs/p_r64_sd2_affine_learned_f1   --gate soft --profile full --infer-top-gene 1000
 
 # ---------------------------------------------------------------- tables
 python scripts/paper_table.py \
-  results/runs/pathway_affine_learned_f1 \
-  results/runs/p_r32_affine_learned_f1 \
-  results/runs/p_r64_affine_learned_f1 \
-  results/runs/p_r96_affine_learned_f1 \
-  results/runs/p_r128_affine_learned_f1 \
-  results/runs/p_rfull_affine_learned_f1 \
+  results/runs/p_r32_sd1_affine_learned_f1 \
+  results/runs/p_r32_sd2_affine_learned_f1 \
+  results/runs/p_r64_sd1_affine_learned_f1 \
+  results/runs/p_r64_sd2_affine_learned_f1 \
   --n-cells 1024 --infer-top-gene 1000 --device cuda --csv results/rank_sample.csv
 
 python scripts/paper_table.py \
-  results/runs/pathway_affine_learned_f1 \
-  results/runs/p_r32_affine_learned_f1 \
-  results/runs/p_r64_affine_learned_f1 \
-  results/runs/p_r96_affine_learned_f1 \
-  results/runs/p_r128_affine_learned_f1 \
-  results/runs/p_rfull_affine_learned_f1 \
+  results/runs/p_r32_sd1_affine_learned_f1 \
+  results/runs/p_r32_sd2_affine_learned_f1 \
+  results/runs/p_r64_sd1_affine_learned_f1 \
+  results/runs/p_r64_sd2_affine_learned_f1 \
   --gate soft --n-cells 1024 --infer-top-gene 1000 --device cuda --csv results/rank_soft.csv
