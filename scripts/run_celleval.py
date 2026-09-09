@@ -152,11 +152,11 @@ for stream in (sys.stdout, sys.stderr):
 
 def main():
     from cell_eval import MetricsEvaluator
-    pred, real, outdir, profile, control, pert_col = sys.argv[1:7]
+    pred, real, outdir, profile, control, pert_col, threads = sys.argv[1:8]
     evaluator = MetricsEvaluator(
         adata_pred=pred, adata_real=real,
         control_pert=control, pert_col=pert_col,
-        outdir=outdir, allow_discrete=False, num_threads=1)
+        outdir=outdir, allow_discrete=False, num_threads=int(threads))
     results, agg = evaluator.compute(profile=profile, break_on_error=False)
     # ASCII only, deliberately. polars renders tables with box-drawing characters,
     # and printing those through a cp949 console produced mojibake at best and a
@@ -187,6 +187,12 @@ def main() -> None:
                              "checkpoint, the data and the transport entirely")
     parser.add_argument("--celleval-python", default=None,
                         help="interpreter holding cell-eval, if not .env-celleval")
+    parser.add_argument("--threads", type=int, default=1,
+                        help="cell-eval worker threads. The DE pass is the whole "
+                             "cost of scoring and it ran single-threaded, which "
+                             "is why this takes longer than the training does. "
+                             "pdex already builds ONE shared matrix for workers "
+                             "to read, so raising this does not raise /dev/shm.")
     parser.add_argument("--gate", default=None,
                         choices=["soft", "hard", "sample"],
                         help="override model.hurdle_gate for this scoring only. "
@@ -272,7 +278,8 @@ def main() -> None:
     completed = subprocess.run(
         [interpreter, script_path,
          os.path.abspath(paths["pred"]), os.path.abspath(paths["real"]),
-         os.path.abspath(out_dir), args.profile, CONTROL_LABEL, PERT_COL],
+         os.path.abspath(out_dir), args.profile, CONTROL_LABEL, PERT_COL,
+         str(args.threads)],
         # The child is told to emit utf-8, so the parent must DECODE utf-8. Left
         # to the locale it decodes as cp949 on a Korean Windows and every non-ascii
         # byte comes back mangled.
