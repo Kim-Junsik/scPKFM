@@ -67,8 +67,16 @@ def _folds(config: dict, method: str) -> list:
     return _FOLDS[key]
 
 
-def load_run(run_dir: str, device: str = "cpu", gate: str | None = None):
+def load_run(run_dir: str, device: str = "cpu", gate: str | None = None,
+             checkpoint_name: str = "checkpoint.pt"):
     """Rebuild a finished run from its checkpoint.
+
+    `checkpoint_name` selects which one. stage1.pt is written the moment stage 1
+    ends and holds the encoder alone, so passing it answers a question about the
+    autoencoder without waiting for the flow: an encoder sweep costs 30 epochs
+    instead of 30 + 1000. There is no field in that file, and the returned field
+    is None rather than a randomly initialised one, so a caller that needs the
+    flow fails loudly instead of measuring noise.
 
     Defaults to cpu: these diagnostics are cheap, and the usual reason to run
     them is that a sweep is still occupying the gpu.
@@ -83,7 +91,7 @@ def load_run(run_dir: str, device: str = "cpu", gate: str | None = None):
     The returned data and stats are SHARED between calls. Nothing here writes to
     them, but a caller that wants to mutate them must copy first.
     """
-    checkpoint = torch.load(os.path.join(run_dir, "checkpoint.pt"),
+    checkpoint = torch.load(os.path.join(run_dir, checkpoint_name),
                             map_location=device, weights_only=False)
     config = checkpoint["config"]
     config["train"]["device"] = config["eval"]["device"] = device
@@ -96,6 +104,9 @@ def load_run(run_dir: str, device: str = "cpu", gate: str | None = None):
 
     vae = build_backbone(config, data.n_genes, data.gene_names).to(device)
     vae.load_state_dict(checkpoint["vae"])
+    if "field" not in checkpoint:
+        vae.eval()
+        return config, data, stats, fold, vae, None
     field = PKFMField(config, data.n_perturbations, vae.latent_dim).to(device)
     field.load_state_dict(checkpoint["field"])
     # Rebuilt rather than unpickled from the checkpoint: it is a function of the

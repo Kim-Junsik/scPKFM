@@ -38,8 +38,9 @@ from src.eval.predict import _head_aux
 
 @torch.no_grad()
 def bottleneck(run_dir: str, device: str, n_cells: int, gate: str | None,
-               infer_top_gene: int | None) -> dict:
-    config, data, stats, fold, vae, _ = load_run(run_dir, device, gate)
+               infer_top_gene: int | None, stage1: bool = False) -> dict:
+    config, data, stats, fold, vae, _ = load_run(
+        run_dir, device, gate, "stage1.pt" if stage1 else "checkpoint.pt")
     rng = np.random.default_rng(config["eval"]["seed"])
     conditions = condition_groups(data, stats, fold,
                                   config["split"]["method"])["test doubles"]
@@ -81,13 +82,20 @@ def main() -> None:
     parser.add_argument("--gate", default=None, choices=["soft", "hard", "sample"])
     parser.add_argument("--infer-top-gene", type=int, default=None,
                         help="restrict to the scanpy-HVG subset scDFM scores on")
+    parser.add_argument("--stage1", action="store_true",
+                        help="read stage1.pt instead of checkpoint.pt. The flow "
+                             "is not used by this measurement, so an encoder "
+                             "experiment can be judged as soon as stage 1 ends "
+                             "instead of after stage 2. Identical numbers on a "
+                             "finished run, since the encoder is frozen in "
+                             "stage 2 (train.finetune_vae_in_stage2).")
     args = parser.parse_args()
 
     print(f"{'run':40}{'n':>4}{'sampling':>11}{'ceiling':>10}")
     ceilings = []
     for run_dir in args.runs:
         row = bottleneck(run_dir, args.device, args.n_cells, args.gate,
-                         args.infer_top_gene)
+                         args.infer_top_gene, args.stage1)
         ceilings.append(row["ceiling"])
         print(f"{os.path.basename(run_dir):40}{row['n']:4d}"
               f"{row['sampling']:11.4f}{row['ceiling']:10.4f}")
