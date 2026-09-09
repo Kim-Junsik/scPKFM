@@ -48,6 +48,16 @@ STAGE1=30                # autoencoding epochs
 STAGE2=200               # flow-matching epochs
 WARMUP=${WARMUP:-60}                # singles-only epochs before combinations join
 
+LR_COSINE=${LR_COSINE:-false}
+                         # true anneals stage 2's lr from --lr to --lr-min over
+                         # stage2_epochs. There was no schedule: fm oscillated
+                         # +-0.005 at the end while its mean moved 0.0005 per
+                         # epoch, which is a step too large to settle, and
+                         # halving the rate outright bought 0.023 in L2 - the
+                         # only gain any axis has produced. A schedule keeps the
+                         # early speed a halved constant rate gives up.
+LR_MIN=${LR_MIN:-1e-6}
+
 STAGE1_LR=${STAGE1_LR:-null}
                          # stage 1's learning rate. null follows --lr. Set both
                          # when they differ: --lr applies to BOTH stages, so
@@ -278,6 +288,8 @@ usage() {
     --resid F              composition residual       (default 5)
     --mmd F                MMD weight                 (default 0)
     --stage1-lr F          stage-1 lr (null = --lr)
+    --lr-cosine            anneal stage-2 lr to --lr-min
+    --lr-min F             floor for --lr-cosine       (default 1e-6)
     --kl F                 stage-1 KL weight          (default 1e-3)
     --hurdle-bce F         gate BCE weight            (default 1.0)
 
@@ -318,6 +330,8 @@ while [ $# -gt 0 ]; do
     --resid)              RESID_WEIGHT=$2; shift 2 ;;
     --mmd)                MMD_WEIGHT=$2; shift 2 ;;
     --stage1-lr)          STAGE1_LR=$2; shift 2 ;;
+    --lr-cosine)          LR_COSINE=true; shift ;;
+    --lr-min)             LR_MIN=$2; shift 2 ;;
     --kl)                 KL_WEIGHT=$2; shift 2 ;;
     --hurdle-bce)         HURDLE_BCE=$2; shift 2 ;;
     --hidden)             HIDDEN=$2; shift 2 ;;
@@ -414,7 +428,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
     train.endpoint_weight=$ENDPOINT_WEIGHT train.mmd_weight=$MMD_WEIGHT \
     train.resid_weight=$RESID_WEIGHT train.resid_steps=$RESID_STEPS \
     train.kl_weight=$KL_WEIGHT model.hurdle_bce_weight=$HURDLE_BCE \
-    train.stage1_lr=$STAGE1_LR \
+    train.stage1_lr=$STAGE1_LR train.lr_cosine=$LR_COSINE train.lr_min=$LR_MIN \
     model.generator=$GENERATOR model.composition=$COMPOSITION \
     ${INIT_VAE_FROM:+train.init_vae_from=$INIT_VAE_FROM} \
     model.latent_readout=$LATENT_READOUT model.generator_rank=$GENERATOR_RANK \

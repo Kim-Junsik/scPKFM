@@ -270,6 +270,16 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         parameters += list(vae.parameters())
     optimiser = torch.optim.AdamW(parameters, lr=train_cfg["lr"],
                                   weight_decay=train_cfg["weight_decay"])
+    # Stepped once per EPOCH, not per condition: T_max counts epochs, and the
+    # inner loop is one pass over the training conditions rather than a sampler
+    # of fixed length.
+    scheduler = None
+    if train_cfg.get("lr_cosine"):
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimiser, T_max=train_cfg["stage2_epochs"],
+            eta_min=train_cfg.get("lr_min", 0.0))
+        log(f"  lr schedule: cosine {train_cfg['lr']:g} -> "
+            f"{train_cfg.get('lr_min', 0.0):g} over {train_cfg['stage2_epochs']} epochs")
 
     # Same pool as stage 1: the standardisation statistics are part of the encoder,
     # so reading held-out cells here leaks exactly as much as training on them.
@@ -463,6 +473,9 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         # checkpoint.pt as "this run finished" and refuses to start over one, so a
         # mid-training file under that name would lock the tag out. Evaluate a
         # partial run with --init-vae-from pointing here, or rename it by hand.
+        if scheduler is not None:
+            scheduler.step()
+
         every = train_cfg.get("stage2_save_every", 0)
         if run_dir and every and (epoch + 1) % every == 0:
             torch.save({"vae": vae.state_dict(), "field": field.state_dict(),

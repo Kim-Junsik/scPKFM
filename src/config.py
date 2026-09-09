@@ -207,6 +207,16 @@ DEFAULTS: dict[str, Any] = {
         # 1e-3 through init_vae_from - and reproducing it on another fold was
         # not expressible until this existed.
         # None follows train.lr, which is the old behaviour.
+        # Cosine decay for stage 2's learning rate, from train.lr down to
+        # lr_min over stage2_epochs. There was no schedule at all: a fixed rate
+        # for every epoch, and fm kept oscillating by +-0.005 at the end while
+        # the mean moved 0.0005 per epoch - the signature of a step too large to
+        # settle. Halving the rate outright bought 0.023 in L2, which is the only
+        # thing any axis has bought, and a schedule keeps the early speed that a
+        # halved constant rate gives up.
+        # False keeps the old behaviour exactly.
+        "lr_cosine": False,
+        "lr_min": 1e-6,
         "stage1_lr": None,
         "kl_weight": 1e-3,
         # Whether stage 2 also trains the VAE. Named for the whole VAE, not just
