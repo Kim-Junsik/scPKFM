@@ -55,6 +55,13 @@ def candidate_interpreters() -> list[str]:
     found = [os.path.join(CELLEVAL_LINUX, "bin", "python"),
              os.path.join(CELLEVAL_WINDOWS, "bin", "python")]
     if os.name == "nt":
+        # Scripts/ first: that is where `python -m venv` and `uv venv` put the
+        # interpreter on Windows. The bare python.exe below is the EMBEDDED
+        # distribution the repo shipped with - DLLs/, Library/, python311.dll and
+        # no Scripts/ - which is a different layout, so looking only for it left
+        # a perfectly good venv undiscovered.
+        found.append(os.path.join(CELLEVAL_WINDOWS, "Scripts", "python.exe"))
+        found.append(os.path.join(CELLEVAL_LINUX, "Scripts", "python.exe"))
         found.append(os.path.join(CELLEVAL_WINDOWS, "python.exe"))
     return found
 

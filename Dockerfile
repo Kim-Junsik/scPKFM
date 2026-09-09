@@ -3,7 +3,7 @@
 # scPKFM - single-cell Pathway Koopman Flow Matching. Training and testing image.
 #
 #   docker build -t scpkfm .
-#   docker run --gpus all --rm -it \
+#   docker run --gpus all --shm-size=8g --rm -it \
 #       -v "$PWD/data:/workspace/data" \
 #       -v "$PWD/assets:/workspace/assets" \
 #       -v "$PWD/results:/workspace/results" \
@@ -18,6 +18,18 @@
 #             of once per container.
 #   results/  checkpoints and metrics. The whole point of the run; it must
 #             outlive the container.
+#
+# --shm-size is not optional for the scoring half. cell-eval's DE pass (pdex)
+# builds ONE dense shared-memory matrix of the whole real set before it computes
+# anything, and POSIX shared memory on Linux lives in /dev/shm - which Docker
+# caps at 64 MB by default no matter how much RAM the host has. 17,918 cells over
+# 1,000 genes in float32 is 68 MiB, so scoring dies with
+#
+#     cell-eval failed (exit -7)
+#
+# a second after "Creating shared memory matrix", naming neither pdex nor
+# /dev/shm. --ipc=host works too and gives the host's own tmpfs, usually half of
+# RAM. Training itself does not need either.
 #
 # KEGG is not baked in. It is free for academic use but redistributing the files
 # is a separate permission, so the image fetches nothing at build time. Either
