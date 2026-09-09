@@ -241,6 +241,13 @@ GENERATOR_RANK=${GENERATOR_RANK:-null}      # null | integer. A_a = U_a V_a inst
 
 N_GEN=${N_GEN:-1024}               # control cells transported per condition at eval time.
 INFER_TOP_GENE=${INFER_TOP_GENE:-1000}      # gene subset the reported table is scored on.
+CELLEVAL_THREADS=${CELLEVAL_THREADS:-8}
+                         # cell-eval worker threads. The DE pass is the whole
+                         # cost of scoring and ran single-threaded, which is why
+                         # it took longer than the training. pdex builds ONE
+                         # shared matrix for its workers, so this does not raise
+                         # /dev/shm.
+
 CELLEVAL=${CELLEVAL:-1}               # score with cell-eval after training. On by default
                          # because five of the reported table's eight columns come
                          # from it, and because skipping it here means paying the
@@ -310,6 +317,7 @@ while [ $# -gt 0 ]; do
     --eval-only)   EVAL_ONLY=1; shift ;;
     --celleval)    CELLEVAL=1; shift ;;
     --no-celleval) CELLEVAL=0; shift ;;
+    --celleval-threads)   CELLEVAL_THREADS=$2; shift 2 ;;
     --gpu_num|--gpu)      GPU_NUM=$2; shift 2 ;;
     --seed)               SEED=$2; shift 2 ;;
     --dataset)            DATASET=$2; shift 2 ;;
@@ -445,7 +453,11 @@ python scripts/summarise_runs.py --filter "$RUN"
 
 echo ""
 echo "=== transport diagnosis ==="
-python scripts/diagnose_transport.py "results/runs/$RUN"
+# --device: the script defaults to cpu so it can be run against a finished run
+# while a sweep still holds the gpu. Here the sweep IS this run and it has just
+# ended, so the gpu is free - and on cpu the P-CAB encoder materialises a
+# [n_cells, K, G] tensor per condition, which turns a minute into most of a day.
+python scripts/diagnose_transport.py "results/runs/$RUN" --device $DEVICE
 
 if [ "$CELLEVAL" -eq 1 ]; then
   echo ""
@@ -465,6 +477,7 @@ if [ "$CELLEVAL" -eq 1 ]; then
   # Non-fatal. `set -e` would otherwise end the script here, after the training
   # has already been paid for, and take the reported table down with it.
   python scripts/run_celleval.py "results/runs/$RUN" --profile full \
+    --threads $CELLEVAL_THREADS \
     --infer-top-gene $INFER_TOP_GENE \
     || echo "[warn] cell-eval did not run - the table's five cell-eval columns" \
             "stay '-'. Fix the interpreter, then: python scripts/run_celleval.py" \
