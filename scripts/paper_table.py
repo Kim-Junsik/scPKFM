@@ -106,6 +106,11 @@ def main() -> None:
                              "so all six columns come from one point estimate. "
                              "Produce that folder first: "
                              "run_celleval.py <run> --gate <gate> --profile full")
+    parser.add_argument("--mean", action="store_true",
+                        help="add a row averaging every run listed, with the "
+                             "per-column standard deviation underneath. This is "
+                             "the number to report: the cited baselines are means "
+                             "over the same five folds.")
     parser.add_argument("--csv", default=None, help="also write the table here")
     args = parser.parse_args()
 
