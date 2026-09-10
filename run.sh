@@ -80,6 +80,16 @@ KL_WEIGHT=${KL_WEIGHT:-1e-3}
 HURDLE_BCE=${HURDLE_BCE:-1.0}
                          # weight on the gate's BCE. Competes with the magnitude
                          # for the same capacity.
+MASK_L1=${MASK_L1:-}      # empty = keep config.py's 1e-5. The P-CAB mask has no
+                         # other brake, and it densifies monotonically while stage
+                         # 1 runs (0.125 at 30 epochs, 0.255 at 150) - so this is
+                         # the knob that decides how much pathway sparsity survives.
+HURDLE_MAGNITUDE=${HURDLE_MAGNITUDE:-}
+                         # empty = keep config.py's gaussian. `point` is plain
+                         # masked MSE. Worth reaching for because the Gaussian NLL
+                         # improves 0.23 between epochs 30 and 150 while rmse moves
+                         # 0.002: past convergence the objective is being minimised
+                         # through sigma rather than through the prediction.
 
 ENDPOINT_WEIGHT=${ENDPOINT_WEIGHT:-3}        # ||Phi_a(z_ctrl) - z_a||^2 over training conditions.
 RESID_WEIGHT=${RESID_WEIGHT:-5}           # ||(Phi_ab - Phi_a - Phi_b + z0) - r_true||^2.
@@ -299,6 +309,8 @@ usage() {
     --lr-min F             floor for --lr-cosine       (default 1e-6)
     --kl F                 stage-1 KL weight          (default 1e-3)
     --hurdle-bce F         gate BCE weight            (default 1.0)
+    --mask-l1 F            P-CAB mask L1              (default 1e-5)
+    --hurdle-magnitude M   gaussian | point (= MSE)   (default gaussian)
 
     --hidden JSON          VAE widths, e.g. [2048,1024]
     --composition-hidden N --latent-dim N
@@ -342,6 +354,8 @@ while [ $# -gt 0 ]; do
     --lr-min)             LR_MIN=$2; shift 2 ;;
     --kl)                 KL_WEIGHT=$2; shift 2 ;;
     --hurdle-bce)         HURDLE_BCE=$2; shift 2 ;;
+    --mask-l1)            MASK_L1=$2; shift 2 ;;
+    --hurdle-magnitude)   HURDLE_MAGNITUDE=$2; shift 2 ;;
     --hidden)             HIDDEN=$2; shift 2 ;;
     --composition-hidden) COMPOSITION_HIDDEN=$2; shift 2 ;;
     --latent-dim)         LATENT_DIM=$2; shift 2 ;;
@@ -441,6 +455,8 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
     ${INIT_VAE_FROM:+train.init_vae_from=$INIT_VAE_FROM} \
     model.latent_readout=$LATENT_READOUT model.generator_rank=$GENERATOR_RANK \
     model.anchor=$ANCHOR train.seed=$SEED \
+    ${MASK_L1:+model.mask_l1=$MASK_L1} \
+    ${HURDLE_MAGNITUDE:+model.hurdle_magnitude=$HURDLE_MAGNITUDE} \
     ${HIDDEN:+model.hidden=$HIDDEN} \
     ${COMPOSITION_HIDDEN:+model.composition_hidden=$COMPOSITION_HIDDEN} \
     ${LATENT_DIM:+model.latent_dim=$LATENT_DIM} \
