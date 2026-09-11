@@ -105,7 +105,7 @@ def fit_ridge_additive(stats: ConditionMeans, train_conditions: list[str],
     for condition in train_conditions:
         if not stats.has(condition):
             continue
-        genes = condition_genes(condition)
+        genes = condition_genes(condition, stats.naming)
         if any(g not in index for g in genes):
             continue
         row = np.zeros(len(perturbations), dtype=np.float64)

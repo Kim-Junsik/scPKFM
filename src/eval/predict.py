@@ -45,8 +45,14 @@ def autoencode(vae, cells: np.ndarray, device: str) -> np.ndarray:
 @torch.no_grad()
 def predict_cells(vae, field, control_cells: np.ndarray, condition: str,
                   pert_index: dict[str, int], n_steps: int,
-                  device: str, anchor: dict | None = None) -> np.ndarray:
-    """`anchor` is the table from eval.baselines.anchor_deltas.
+                  device: str, naming, anchor: dict | None = None) -> np.ndarray:
+    """`naming` parses the condition; `anchor` is eval.baselines.anchor_deltas.
+
+    naming is positional and has no default on purpose. It used to fall back to
+    the module-level 'ctrl' convention, which is right for Norman and wrong for
+    combosciplex, where the control is spelled control+control: the fallback
+    turned 'control+Panobinostat' into two perturbations and raised
+    KeyError: 'control' from inside stage 2, a thousand lines from the cause.
 
     THE choke point for anchoring at inference: every scoring path in this
     repository ends up here, so applying the shift once here is what keeps
@@ -65,7 +71,7 @@ def predict_cells(vae, field, control_cells: np.ndarray, condition: str,
     field.eval()
     if anchor is None:
         anchor = getattr(field, "anchor_table", None)
-    perturbations = [pert_index[g] for g in condition_genes(condition)]
+    perturbations = [pert_index[g] for g in condition_genes(condition, naming)]
     shift = (anchor or {}).get(condition)
     if shift is not None:
         control_cells = control_cells + shift.astype(control_cells.dtype, copy=False)
@@ -100,7 +106,8 @@ def evaluate_model(vae, field, data, stats, folds, method, config,
                               size=min(n_gen, control_cells.shape[0]), replace=False)
             control_sample = control_cells[pick]
             predicted = predict_cells(vae, field, control_sample, double,
-                                      data.pert_index, n_steps, device, anchor)
+                                      data.pert_index, n_steps, device,
+                                      data.naming, anchor)
 
             m_hat = predicted.mean(axis=0)
             m_ab, m_a = stats.mean[double], stats.mean[single_a]

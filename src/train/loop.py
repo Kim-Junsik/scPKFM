@@ -362,7 +362,8 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         totals_mmd: list[float] = []
         for condition in conditions:
             source, target, _ = sampler.batch(condition)
-            perturbations = [data.pert_index[g] for g in condition_genes(condition)]
+            perturbations = [data.pert_index[g]
+                             for g in condition_genes(condition, data.naming)]
 
             x0 = _to_device(source, device)
             x1 = _to_device(target, device)

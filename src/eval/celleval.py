@@ -72,7 +72,7 @@ def build_pair(vae, field, data, fold: dict, config: dict,
         pick = rng.choice(control_cells.shape[0], size=n,
                           replace=control_cells.shape[0] < n)
         predicted = predict_cells(vae, field, control_cells[pick], condition,
-                                  data.pert_index, n_steps, device)
+                                  data.pert_index, n_steps, device, data.naming)
         label = to_celleval_label(condition, data.naming)
         pred_blocks.append(predicted)
         pred_labels += [label] * n
