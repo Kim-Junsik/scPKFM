@@ -138,6 +138,13 @@ def condition_groups(data, stats, fold, method: str) -> dict[str, list[str]]:
         "train singles": [c for c in seen if naming.is_single(c) and stats.has(c)],
         "train doubles": [c for c in seen if naming.is_double(c) and stats.has(c)],
         "test doubles": test_doubles,
+        # Empty under the additive split, where every held-out condition is a
+        # double. Under the combination holdout the singles of every held-out
+        # gene are held out too, and the literature reports them as their own
+        # block - scoring the two together averages a harder population with an
+        # easier one and the number belongs to neither.
+        "test singles": [c for c in fold["test"]
+                         if naming.is_single(c) and stats.has(c)],
     }
 
 

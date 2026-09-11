@@ -52,26 +52,57 @@ CELLEVAL = [
 NOT_COMPUTABLE = ["Pears_dhat", "Pears_dhat20"]
 
 
-def celleval_means(run_dir: str, gate: str | None = None) -> dict[str, str] | None:
+def celleval_means(run_dir: str, gate: str | None = None,
+                   group: str = "double") -> dict[str, str] | None:
     """Reads the scoring produced under the SAME gate the L2 pass will use.
 
     run_celleval.py writes to celleval_<gate>/ when given --gate, so mixing a
     soft L2 with a sample cell-eval - five of the eight columns silently coming
     from a different point estimate - is not expressible here.
+
+    Averaged from the per-condition results.csv rather than read off
+    agg_results.csv, because the aggregate cannot be split. Under the
+    combination holdout celleval.build_pair scores everything in fold["test"],
+    and that is 15 doubles AND the ~23 singles of the held-out genes; the
+    literature reports those as two blocks. Taking the aggregate would have
+    compared our mixed number against their Double column, with the easier
+    singles making up the majority of our rows.
+
+    The two agree exactly when nothing is filtered: checked on an additive run,
+    all five metrics identical to 1e-16.
     """
     folder = "celleval" if not gate else f"celleval_{gate}"
-    path = os.path.join(run_dir, folder, "agg_results.csv")
+    path = os.path.join(run_dir, folder, "results.csv")
     if not os.path.exists(path):
         return None
+    # celleval labels a double 'A+B' and a single 'A' (celleval.to_celleval_label),
+    # so the separator is the arity.
+    keep = {"double": lambda p: "+" in p,
+            "single": lambda p: "+" not in p,
+            "all": lambda p: True}[group]
     with open(path, newline="", encoding="utf-8") as handle:
-        for record in csv.DictReader(handle):
-            if record.get("statistic") == "mean":
-                return record
-    return None
+        rows = [r for r in csv.DictReader(handle)
+                if keep(r.get("perturbation", ""))]
+    if not rows:
+        return None
+    means: dict[str, str] = {}
+    for key, _, _ in CELLEVAL:
+        values = []
+        for row in rows:
+            try:
+                value = float(row[key])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if np.isfinite(value):
+                values.append(value)
+        if values:
+            means[key] = str(float(np.mean(values)))
+    means["n"] = str(len(rows))
+    return means
 
 
 def compute_l2(run_dir: str, device: str, n_cells: int, gate: str | None = None,
-               infer_top_gene: int | None = None) -> float:
+               infer_top_gene: int | None = None, group: str = "double") -> float:
     """Eq. (15) over the fold's test doubles - the same conditions resid_R2 uses.
 
     `infer_top_gene` restricts the gene space to the subset scDFM scores on, which
@@ -82,7 +113,10 @@ def compute_l2(run_dir: str, device: str, n_cells: int, gate: str | None = None,
     rng = np.random.default_rng(config["eval"]["seed"])
     conditions = condition_groups(data, stats, fold, config["split"]["method"])
     genes = scdfm_eval_genes(data, fold, infer_top_gene) if infer_top_gene else None
-    rows = measure_transport(vae, field, data, stats, conditions["test doubles"],
+    wanted = {"double": conditions["test doubles"],
+              "single": conditions["test singles"],
+              "all": conditions["test doubles"] + conditions["test singles"]}[group]
+    rows = measure_transport(vae, field, data, stats, wanted,
                              config, rng, device, n_cells, genes=genes)
     return float(np.mean([r["l2"] for r in rows])) if rows else float("nan")
 
@@ -111,6 +145,14 @@ def main() -> None:
                              "per-column standard deviation underneath. This is "
                              "the number to report: the cited baselines are means "
                              "over the same five folds.")
+    parser.add_argument("--group", default="double",
+                        choices=["double", "single", "all"],
+                        help="which held-out conditions to score. The additive "
+                             "split holds out only doubles, so this changes "
+                             "nothing there. The combination holdout also holds "
+                             "out the singles of every held-out gene, and the "
+                             "literature reports Single and Double as separate "
+                             "blocks - run this twice to fill both.")
     parser.add_argument("--csv", default=None, help="also write the table here")
     args = parser.parse_args()
 
@@ -130,6 +172,7 @@ def main() -> None:
         print("no finished run matched.")
         return
 
+    print(f"scoring the {args.group} held-out conditions")
     headers = ["L2"] + [h for _, h, _ in CELLEVAL] + NOT_COMPUTABLE
     line = f"{'run':32s} " + " ".join(f"{h:>12s}" for h in headers)
     print(line)
@@ -138,10 +181,10 @@ def main() -> None:
     table = []
     for run_dir in runs:
         name = os.path.basename(run_dir.rstrip("/\\"))
-        values = celleval_means(run_dir, args.gate)
+        values = celleval_means(run_dir, args.gate, args.group)
         l2 = (float("nan") if args.no_l2 else
               compute_l2(run_dir, args.device, args.n_cells, args.gate,
-                         args.infer_top_gene))
+                         args.infer_top_gene, args.group))
 
         cells = [f"{l2:12.4f}" if np.isfinite(l2) else f"{'-':>12s}"]
         record = {"run": name, "L2": l2}
