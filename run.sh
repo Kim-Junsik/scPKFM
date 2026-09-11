@@ -375,10 +375,16 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-$GPU_NUM}
 case "$DATASET" in
   norman)
     RAW=data/norman/norman.h5ad
+    CONTROL_LABEL=ctrl
     SPLIT_ARGS="split.source=reference_pkl split.reference_pkl=data/norman/split_results.pkl split.method=$METHOD"
     ;;
   combosciplex)
     RAW=data/combosciplex/combosciplex.h5ad
+    # Its control is spelled control+control, not ctrl. A condition is control
+    # when it names no perturbation (conventions.py, is_control), so the wrong
+    # label makes EVERY condition look perturbed and the load fails outright
+    # rather than silently training against the wrong reference.
+    CONTROL_LABEL=control
     SPLIT_ARGS="split.source=obs_column split.obs_key=split split.obs_test_value=ood"
     if [ "$FOLD" != "0" ]; then
       echo "combosciplex has one fold; --fold must be 0 (got $FOLD)" >&2
@@ -431,6 +437,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
   if [ ! -f "$CACHE" ]; then
     echo "=== building $CACHE ==="
     python data_prepare.py --set data.n_hvg=$N_HVG \
+      data.control_label=$CONTROL_LABEL \
       data.hvg_criterion=$HVG_CRITERION data.cache_h5ad=$CACHE data.raw_h5ad=$RAW \
       data.exclude_test_from_hvg=$STRICT_SPLIT split.fold=$FOLD $SPLIT_ARGS
     echo ""
@@ -442,6 +449,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
   echo "=== training $RUN ==="
   python scripts/train.py --tag "$RUN" --set \
     data.raw_h5ad=$RAW data.cache_h5ad=$CACHE data.n_hvg=$N_HVG \
+    data.control_label=$CONTROL_LABEL \
     data.hvg_criterion=$HVG_CRITERION $SPLIT_ARGS \
     split.fold=$FOLD \
     train.batch_size=$BATCH train.lr=$LR \
