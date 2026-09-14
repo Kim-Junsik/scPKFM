@@ -115,6 +115,59 @@ def folds_from_obs(config: dict) -> list[dict[str, Any]]:
     return [{"train": train, "test": test, "train_doubles": train}]
 
 
+# scDFM's held-out conditions for combosciplex, verbatim and in their order, from
+# scDFM/src/data_process/data.py (process_data, combosciplex branch). The list is
+# hard-coded there and none of their run scripts overrides it, so it IS the test
+# set behind their combosciplex table.
+SCDFM_COMBOSCIPLEX_TEST = [
+    "Panobinostat+Crizotinib",
+    "Panobinostat+Curcumin",
+    "Panobinostat+SRT1720",
+    "Panobinostat+Sorafenib",
+    "SRT2104+Alvespimycin",
+    "control+Alvespimycin",
+    "control+Dacinostat",
+]
+
+
+def folds_from_list(config: dict) -> list[dict[str, Any]]:
+    """One fold whose test set is an explicit list of conditions.
+
+    This is scDFM's combosciplex split: a condition is test if it is in the list
+    and train otherwise, control always on the train side. The file's own
+    obs['split'] column disagrees with that list - six of the seven are 'train'
+    there - which is why obs_column cannot reproduce their table.
+
+    `split.test_conditions` null means SCDFM_COMBOSCIPLEX_TEST. A listed condition
+    absent from the data raises: scDFM's code would quietly test on fewer
+    conditions, and a row averaged over a different set is not comparable.
+
+    Two of scDFM's seven are single drugs, so unlike obs_column this fold holds
+    out singles. They are recorded in `held_out_singles`, and
+    baselines.training_conditions excludes every test condition explicitly -
+    without that, its "every single is trainable" rule would put them back.
+    """
+    # Local import: conventions is a leaf module, but keeping it out of module
+    # scope means this file's import order can never become circular.
+    from .conventions import ConditionNaming
+
+    split_cfg = config["split"]
+    test = list(split_cfg.get("test_conditions") or SCDFM_COMBOSCIPLEX_TEST)
+    if len(set(test)) != len(test):
+        raise ValueError(f"split.test_conditions repeats a condition: {test}")
+    present = set(_read_obs(config)["condition"].astype(str).tolist())
+    missing = [c for c in test if c not in present]
+    if missing:
+        raise ValueError(f"split.test_conditions names conditions absent from the "
+                         f"data: {missing}")
+    naming = ConditionNaming.from_config(config)
+    held = set(test)
+    train = sorted(c for c in present if c not in held)
+    return [{"train": train, "test": test,
+             "train_doubles": [c for c in train if naming.is_double(c)],
+             "held_out_singles": [c for c in test if naming.is_single(c)]}]
+
+
 def folds_generated(config: dict) -> list[dict[str, Any]]:
     """Make a split for a dataset that ships none.
 
@@ -229,6 +282,8 @@ def folds(config: dict, method: str | None = None) -> list[dict[str, Any]]:
     source = config["split"].get("source", "reference_pkl")
     if source == "obs_column":
         return folds_from_obs(config)
+    if source == "list":
+        return folds_from_list(config)
     if source == "generated":
         return folds_generated(config)
     reference = load(config["split"]["reference_pkl"])
@@ -267,6 +322,17 @@ def validate(config: dict) -> dict[str, Any]:
                 "additive_test_pairwise_overlap": (0, 0),
                 "doubles_train_in_every_fold": len(
                     set.intersection(*[set(f["train"]) for f in generated]))}
+
+    if source == "list":
+        fold = folds_from_list(config)[0]
+        overlap = set(fold["train"]) & set(fold["test"])
+        if overlap:
+            raise ValueError(f"list split puts {overlap} in both train and test")
+        return {"n_folds": 1, "reference_ok": True, "combinations_derived": False,
+                "additive_sizes": [(len(fold["train"]), len(fold["test"]))],
+                "combinations_sizes": [], "source": "list",
+                "additive_test_pairwise_overlap": (0, 0),
+                "doubles_train_in_every_fold": len(fold["train_doubles"])}
 
     if source == "obs_column":
         fold = folds_from_obs(config)[0]

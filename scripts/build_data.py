@@ -71,6 +71,11 @@ def main() -> None:
         print(f"\n{cache_path} already exists - pass --force to rebuild.")
         return
 
+    # A dataset whose shipped X is not normalised the way the reference pipeline
+    # normalises it (combosciplex) is rebuilt from its counts layer first, and
+    # every pass below reads that copy. Norman leaves this off and reads X as is.
+    raw_path = preprocess.normalised_source(config)
+
     # ---------------------------------------------------------------- genes
     print("\n=== 2. gene statistics (streaming pass over the raw matrix) ===")
     n_obs, n_var = io.shape(raw_path)

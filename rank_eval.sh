@@ -20,10 +20,13 @@
 # the Dockerfile) and keep these sequential anyway; the GPU is the bottleneck.
 #
 # Combosciplex has one fold and so is not this script's shape. Two lines:
-#   python scripts/run_celleval.py results/runs/fin_combosciplex_affine_learned_f0 \
+#   python scripts/run_celleval.py results/runs/fin_combosciplex_scdfm7_affine_learned_f0 \
 #       --gate soft --profile full --infer-top-gene 1000 --threads 16
-#   python scripts/paper_table.py results/runs/fin_combosciplex_affine_learned_f0 \
-#       --gate soft --n-cells 1024 --infer-top-gene 1000 --device cuda
+#   python scripts/paper_table.py results/runs/fin_combosciplex_scdfm7_affine_learned_f0 \
+#       --gate soft --group all --n-cells 1024 --infer-top-gene 1000 --device cuda
+# --group all: scDFM's combosciplex table averages all seven held-out conditions,
+# the two single drugs included. Their Control L2 reproduces over all seven
+# (5.3260 against 5.3716), not over the five combinations alone (5.9689).
 #
 # --infer-top-gene 1000 is on every line because run.sh passes it, so the scores
 # already on disk are over those genes. --gate soft on both the scoring and the

@@ -150,9 +150,9 @@ LATENT_DIM=${LATENT_DIM:-}
 DATASET=${DATASET:-norman}   # norman | combosciplex. Sets the raw file, the
                              # cache name and where the split comes from, because
                              # those three have to agree: combosciplex ships no
-                             # split pickle and carries obs['split'] per cell
-                             # instead, and a cache built for one dataset under
-                             # the other's name is the kind of mix-up that only
+                             # split pickle and is held out by scDFM's explicit
+                             # seven-condition list, and a cache built for one
+                             # dataset under the other's name is the kind of mix-up that only
                              # shows up as a bad score.
 
 METHOD=${METHOD:-additive}   # additive | combinations. Which holdout the fold
@@ -377,6 +377,8 @@ case "$DATASET" in
     RAW=data/norman/norman.h5ad
     CONTROL_LABEL=ctrl
     SPLIT_ARGS="split.source=reference_pkl split.reference_pkl=data/norman/split_results.pkl split.method=$METHOD"
+    SPLIT_TAG=""
+    NORM_ARGS=""
     ;;
   combosciplex)
     RAW=data/combosciplex/combosciplex.h5ad
@@ -385,7 +387,18 @@ case "$DATASET" in
     # label makes EVERY condition look perturbed and the load fails outright
     # rather than silently training against the wrong reference.
     CONTROL_LABEL=control
-    SPLIT_ARGS="split.source=obs_column split.obs_key=split split.obs_test_value=ood"
+    # scDFM's own test set: seven conditions hard-coded in their data.py, two of
+    # them single drugs (splits.SCDFM_COMBOSCIPLEX_TEST). The file's obs['split']
+    # 'ood' value is a DIFFERENT set - six of scDFM's seven are 'train' there - so
+    # a run on it cannot be compared against their combosciplex table.
+    SPLIT_ARGS="split.source=list"
+    # Enters the cache and run names, so nothing built on the old obs['split']
+    # holdout (a cache, a crashed run directory) is silently picked up again.
+    SPLIT_TAG=_scdfm7
+    # Rebuild X from layers['counts'] at the median library size, as scDFM does.
+    # The shipped X is normalised to 10,000 per cell and puts L2 on a scale 1.5x
+    # the published one (Control L2 8.2540 vs 5.3716; renormalised 5.3260).
+    NORM_ARGS="data.normalise_from_counts=counts"
     if [ "$FOLD" != "0" ]; then
       echo "combosciplex has one fold; --fold must be 0 (got $FOLD)" >&2
       exit 1
@@ -401,13 +414,14 @@ esac
 # filing any of those under one name mixes results that cannot be compared.
 SUFFIX=""
 [ "$DATASET" = "norman" ] || SUFFIX="${SUFFIX}_${DATASET}"
+SUFFIX="${SUFFIX}${SPLIT_TAG}"
 [ "$METHOD" = "additive" ] || SUFFIX="${SUFFIX}_${METHOD}"
 RUN=${TAG}${SUFFIX}_${GENERATOR}_${COMPOSITION}_f${FOLD}
 
 # The cache is NOT named that way: it must differ whenever the gene selection
 # differs, and STRICT_SPLIT excludes the held-out conditions from HVG selection,
 # so additive and combinations pick different genes from the same fold.
-CACHE=assets/${DATASET}_scanpy${N_HVG}_${METHOD}_fold${FOLD}.h5ad
+CACHE=assets/${DATASET}_scanpy${N_HVG}_${METHOD}${SPLIT_TAG}_fold${FOLD}.h5ad
 
 echo "=== configuration ==="
 echo "  gpu       $GPU_NUM  (CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)"
@@ -439,7 +453,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
     python data_prepare.py --set data.n_hvg=$N_HVG \
       data.control_label=$CONTROL_LABEL \
       data.hvg_criterion=$HVG_CRITERION data.cache_h5ad=$CACHE data.raw_h5ad=$RAW \
-      data.exclude_test_from_hvg=$STRICT_SPLIT split.fold=$FOLD $SPLIT_ARGS
+      data.exclude_test_from_hvg=$STRICT_SPLIT split.fold=$FOLD $SPLIT_ARGS $NORM_ARGS
     echo ""
   else
     echo "using existing cache $CACHE"
@@ -450,7 +464,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
   python scripts/train.py --tag "$RUN" --set \
     data.raw_h5ad=$RAW data.cache_h5ad=$CACHE data.n_hvg=$N_HVG \
     data.control_label=$CONTROL_LABEL \
-    data.hvg_criterion=$HVG_CRITERION $SPLIT_ARGS \
+    data.hvg_criterion=$HVG_CRITERION $SPLIT_ARGS $NORM_ARGS \
     split.fold=$FOLD \
     train.batch_size=$BATCH train.lr=$LR \
     train.stage1_epochs=$STAGE1 train.stage2_epochs=$STAGE2 \

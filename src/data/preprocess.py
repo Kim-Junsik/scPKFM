@@ -30,6 +30,79 @@ def perturbation_targets(conditions: np.ndarray, control_label: str = "ctrl") ->
     return sorted(targets)
 
 
+def normalised_source(config: dict) -> str:
+    """The file every streaming pass reads: the shipped matrix, or a copy of it
+    renormalised from a raw-count layer.
+
+    `data.normalise_from_counts` null (Norman) returns data.raw_h5ad untouched -
+    its X is already the log1p matrix the reference pipeline scores on. Set to a
+    layer name (combosciplex: "counts"), the counts are normalised the way
+    scDFM's combosciplex branch does it,
+
+        adata.X = adata.layers["counts"]; sc.pp.normalize_total(adata); sc.pp.log1p(adata)
+
+    over ALL cells, and the result is written next to the raw file once. This is
+    not cosmetic: combosciplex ships an X normalised to 10,000 counts per cell,
+    while scanpy's default target is the median library size (2,579 there).
+    Measured over scDFM's seven test conditions, the shipped X gives Control L2
+    8.2540 against their published 5.3716; the renormalised counts give 5.3260.
+
+    scanpy is called rather than reimplemented, for the same reason as
+    scanpy_hvg. The median is taken over every cell, test included, as scDFM
+    does; it is a single scalar and carries no condition label.
+    """
+    import json
+    import os
+
+    data_cfg = config["data"]
+    layer = data_cfg.get("normalise_from_counts")
+    raw = data_cfg["raw_h5ad"]
+    if not layer:
+        return raw
+    stem, _ = os.path.splitext(raw)
+    target = f"{stem}_lognorm_{layer}_median.h5ad"
+    if os.path.exists(target):
+        print(f"  using renormalised copy {target}")
+        return target
+
+    import anndata as ad
+    import pandas as pd
+    import scanpy as sc
+
+    print(f"  renormalising {raw} from layers[{layer!r}] "
+          f"(normalize_total at the median library, then log1p) ...")
+    source = ad.read_h5ad(raw)
+    if layer not in source.layers:
+        raise ValueError(f"{raw} has no layers[{layer!r}]; found {list(source.layers)}")
+    counts = sparse.csr_matrix(source.layers[layer], dtype=np.float32)
+    probe = counts.data[:100000]
+    if probe.size and not np.allclose(probe, np.round(probe)):
+        raise ValueError(f"layers[{layer!r}] is not integer-valued, so it does not hold counts")
+
+    # Only what the cache build reads back: the condition, and any column a split
+    # source may be keyed on. The index is kept, since the cache copies it.
+    wanted = ["condition", config["split"].get("obs_key"), config["split"].get("group_key")]
+    keep = list(dict.fromkeys(c for c in wanted if c and c in source.obs.columns))
+    if "condition" not in keep:
+        raise ValueError(f"{raw} has no obs['condition']")
+
+    library = np.asarray(counts.sum(axis=1)).ravel()
+    median = float(np.median(library[library > 0]))
+    adata = ad.AnnData(X=counts, obs=source.obs[keep].copy(),
+                       var=pd.DataFrame(index=source.var_names.copy()))
+    del source
+    sc.pp.normalize_total(adata)
+    sc.pp.log1p(adata)
+    # log1p records {'base': None}, which some anndata versions refuse to write.
+    adata.uns.pop("log1p", None)
+    adata.uns["normalisation"] = json.dumps({
+        "source": raw, "layer": layer, "target_sum": median,
+        "recipe": "sc.pp.normalize_total(target_sum=None) + sc.pp.log1p"})
+    adata.write_h5ad(target)
+    print(f"  median library size {median:.1f}  ->  wrote {target}")
+    return target
+
+
 def gene_statistics(path: str, chunk_size: int,
                     keep: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Per-gene mean and variance, in one streaming pass.

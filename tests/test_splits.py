@@ -208,3 +208,107 @@ def test_every_split_condition_exists_in_the_data(config):
             for key in ("train", "test"):
                 missing = set(fold[key]) - conditions
                 assert not missing, f"{method} fold {i} {key} names absent conditions: {missing}"
+
+
+# ---------------------------------------------------------------- explicit list (combosciplex)
+COMBOSCIPLEX_RAW = "data/combosciplex/combosciplex.h5ad"
+SCDFM_SINGLE_DRUGS = ["control+Alvespimycin", "control+Dacinostat"]
+
+
+@pytest.fixture(scope="module")
+def combosciplex_config():
+    if not os.path.exists(COMBOSCIPLEX_RAW):
+        pytest.skip(f"{COMBOSCIPLEX_RAW} not present")
+    # The cache path points nowhere on purpose, so the split is read from the raw
+    # file's obs - the same obs any cache built from it would carry.
+    return config_module.load([f"data.raw_h5ad={COMBOSCIPLEX_RAW}",
+                               "data.cache_h5ad=assets/__no_cache_for_split_tests__.h5ad",
+                               "data.control_label=control",
+                               "split.source=list"])
+
+
+@pytest.fixture(scope="module")
+def combosciplex_stats(combosciplex_config):
+    import anndata as ad
+    import numpy as np
+    from src.data.conventions import ConditionNaming
+    from src.eval import baselines
+
+    conditions = ad.read_h5ad(COMBOSCIPLEX_RAW, backed="r").obs["condition"].astype(str).to_numpy()
+    return baselines.ConditionMeans(np.zeros((len(conditions), 1), dtype=np.float32),
+                                    conditions, ConditionNaming.from_config(combosciplex_config))
+
+
+def test_list_default_is_scdfm_combosciplex_seven_verbatim(combosciplex_config):
+    """Their table's test set, in their order - not obs['split'] == 'ood'."""
+    loaded = splits.folds(combosciplex_config)
+    assert len(loaded) == 1
+    assert loaded[0]["test"] == splits.SCDFM_COMBOSCIPLEX_TEST
+
+
+def test_list_split_partitions_the_data(combosciplex_config):
+    import anndata as ad
+    present = set(ad.read_h5ad(COMBOSCIPLEX_RAW, backed="r").obs["condition"].astype(str))
+    fold = splits.folds(combosciplex_config)[0]
+    assert not set(fold["train"]) & set(fold["test"])
+    assert set(fold["train"]) | set(fold["test"]) == present
+
+
+def test_list_records_its_single_drug_holdouts(combosciplex_config):
+    fold = splits.folds(combosciplex_config)[0]
+    assert fold["held_out_singles"] == SCDFM_SINGLE_DRUGS
+    assert set(fold["held_out_singles"]) <= set(fold["test"])
+    assert not set(fold["train_doubles"]) & set(fold["test"])
+
+
+@pytest.mark.parametrize("method", ["additive", "combinations"])
+def test_list_training_conditions_never_include_a_test_condition(
+        combosciplex_config, combosciplex_stats, method):
+    """The leak this source would open without the explicit exclusion.
+
+    run.sh passes no split.method for combosciplex, so training runs under the
+    additive rule "train list + every single" - which, before the exclusion,
+    handed both of scDFM's single-drug test conditions back to training.
+    """
+    from src.eval import baselines
+
+    fold = splits.folds(combosciplex_config)[0]
+    allowed = baselines.training_conditions(combosciplex_stats, fold, method)
+    assert not set(allowed) & set(fold["test"]), f"{method} trains on a test condition"
+    assert len(allowed) == len(set(allowed)), f"{method} lists a condition twice"
+    naming = combosciplex_stats.naming
+    trainable_singles = {c for c in combosciplex_stats.mean
+                         if naming.is_single(c) and c not in fold["test"]}
+    assert trainable_singles <= set(allowed), f"{method} dropped a trainable single"
+
+
+def test_list_rejects_a_condition_absent_from_the_data(combosciplex_config):
+    import copy
+    broken = copy.deepcopy(combosciplex_config)
+    broken["split"]["test_conditions"] = ["NotADrug+control"]
+    with pytest.raises(ValueError, match="absent from the data"):
+        splits.folds(broken)
+
+
+def test_validate_accepts_the_list_source(combosciplex_config):
+    report = splits.validate(combosciplex_config)
+    assert report["source"] == "list" and report["n_folds"] == 1
+
+
+# ---------------------------------------------------------------- norman is unchanged
+def test_additive_training_conditions_are_train_doubles_then_every_single(config):
+    """The explicit test exclusion must not change Norman's additive list at all."""
+    cache = config["data"]["cache_h5ad"]
+    if not os.path.exists(cache):
+        pytest.skip(f"{cache} not built")
+    import anndata as ad
+    import numpy as np
+    from src.eval import baselines
+
+    conditions = ad.read_h5ad(cache, backed="r").obs["condition"].astype(str).to_numpy()
+    stats = baselines.ConditionMeans(np.zeros((len(conditions), 1), dtype=np.float32),
+                                     conditions)
+    singles = [c for c in stats.mean if stats.naming.is_single(c)]
+    for i, fold in enumerate(splits.folds(config, "additive")):
+        allowed = baselines.training_conditions(stats, fold, "additive")
+        assert allowed == list(fold["train"]) + singles, f"fold {i}"

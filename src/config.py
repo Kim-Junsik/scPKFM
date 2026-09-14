@@ -24,6 +24,12 @@ DEFAULTS: dict[str, Any] = {
         # X in the source file is ALREADY log1p-normalised (values 0.305-6.405,
         # non-integer, no raw-count layer). Never re-apply normalize_total/log1p.
         "assume_prenormalised": True,
+        # A layer holding raw counts to rebuild X from, or null to use X as
+        # shipped. combosciplex needs "counts": its X is normalised to 10,000 per
+        # cell, the reference pipeline to the median library size, and that moves
+        # Control L2 from 5.33 to 8.25 on the same cells. See
+        # preprocess.normalised_source.
+        "normalise_from_counts": None,
         "n_hvg": 3000,  # null selects every gene
         "hvg_criterion": "raw_variance",  # raw_variance | dispersion | scanpy
         # scanpy calls sc.pp.highly_variable_genes with its seurat default,
@@ -54,7 +60,13 @@ DEFAULTS: dict[str, Any] = {
         #                their split per cell instead (combosciplex).
         # generated:     make one deterministically from a seed, for a dataset
         #                that ships no split at all. Nothing is written to disk.
-        "source": "reference_pkl",  # reference_pkl | obs_column | generated
+        # list:          an explicit set of held-out conditions, one fold. With
+        #                test_conditions null this is scDFM's seven for
+        #                combosciplex (splits.SCDFM_COMBOSCIPLEX_TEST), the set
+        #                behind their table; obs_column's 'ood' shares only one
+        #                condition with it.
+        "source": "reference_pkl",  # reference_pkl | obs_column | generated | list
+        "test_conditions": None,  # source=list only; null = scDFM's combosciplex seven
         "reference_pkl": "data/norman/split_results.pkl",
         "obs_key": "split",
         "obs_test_value": "test",

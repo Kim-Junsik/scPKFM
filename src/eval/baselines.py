@@ -268,11 +268,22 @@ def training_conditions(stats: ConditionMeans, fold: dict, method: str) -> list[
                    part of the additive split).
     combinations : the fold's own train list, which already excludes the
                    held-out singles.
+
+    Whatever the method, nothing in fold["test"] is returned. Both rules above
+    assume a test side with no singles, or with its singles recorded in
+    held_out_singles; an explicit list (split.source=list) can hold out singles
+    too, and "every single" would then hand them straight back to training. On
+    Norman's additive and combinations folds the result is unchanged.
     """
     singles = [c for c in stats.mean if stats.naming.is_single(c)]
-    if method == "combinations":
-        # Every single EXCEPT the held-out ones. Those are the whole point of the
-        # split, so reading them would leak; the rest stay available.
-        held = set(fold.get("held_out_singles", ()))
-        return list(fold["train_doubles"]) + [c for c in singles if c not in held]
-    return list(fold["train"]) + singles
+    held = set(fold["test"]) | set(fold.get("held_out_singles", ()))
+    base = fold["train_doubles"] if method == "combinations" else fold["train"]
+    # Order kept, duplicates dropped: a source whose train list already carries
+    # singles (obs_column, list) would otherwise sample each of them twice.
+    seen: set[str] = set()
+    out: list[str] = []
+    for condition in list(base) + singles:
+        if condition not in held and condition not in seen:
+            seen.add(condition)
+            out.append(condition)
+    return out
