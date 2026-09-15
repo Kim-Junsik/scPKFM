@@ -98,7 +98,12 @@ def normalised_source(config: dict) -> str:
     adata.uns["normalisation"] = json.dumps({
         "source": raw, "layer": layer, "target_sum": median,
         "recipe": "sc.pp.normalize_total(target_sum=None) + sc.pp.log1p"})
-    adata.write_h5ad(target)
+    # Written under a temporary name and renamed into place, so another process
+    # never opens a half-written copy; two processes racing to build it both
+    # finish a whole file and the rename keeps the last.
+    partial = f"{stem}_lognorm_{layer}_median.tmp-{os.getpid()}.h5ad"
+    adata.write_h5ad(partial)
+    os.replace(partial, target)
     print(f"  median library size {median:.1f}  ->  wrote {target}")
     return target
 

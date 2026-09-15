@@ -40,8 +40,8 @@ def coupling_plan(source: torch.Tensor, target: torch.Tensor, method: str,
 
 
 def sample_pairs(source: torch.Tensor, target: torch.Tensor, method: str,
-                 reg: float, reg_marginal: float,
-                 rng: np.random.Generator) -> tuple[torch.Tensor, torch.Tensor]:
+                 reg: float, reg_marginal: float, rng: np.random.Generator,
+                 stats: dict | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Draw index pairs from the transport plan, treating it as a joint law.
 
     Sampling rather than taking a hard assignment keeps the plan's mass structure:
@@ -51,7 +51,13 @@ def sample_pairs(source: torch.Tensor, target: torch.Tensor, method: str,
     plan = coupling_plan(source, target, method, reg, reg_marginal)
     flat = plan.reshape(-1)
     total = flat.sum()
-    if not np.isfinite(total) or total <= 0:  # degenerate plan -> fall back to random
+    degenerate = not np.isfinite(total) or total <= 0
+    if stats is not None:
+        # Counted so the caller can log and bound it: without this a failed plan
+        # turns the coupling into random pairing with no visible sign.
+        stats["plans"] = stats.get("plans", 0) + 1
+        stats["fallbacks"] = stats.get("fallbacks", 0) + int(degenerate)
+    if degenerate:  # fall back to random pairing for this batch
         flat = np.full_like(flat, 1.0 / flat.size)
     else:
         flat = flat / total

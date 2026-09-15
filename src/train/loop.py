@@ -360,6 +360,7 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         totals_resid: list[float] = []
         totals_end: list[float] = []
         totals_mmd: list[float] = []
+        coupling_stats = {"plans": 0, "fallbacks": 0}
         for condition in conditions:
             source, target, _ = sampler.batch(condition)
             perturbations = [data.pert_index[g]
@@ -376,7 +377,8 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
                     z1, _ = vae.encode_z(x1)
 
             z0p, z1p = sample_pairs(z0, z1, train_cfg["coupling"], train_cfg["uot_reg"],
-                                    train_cfg["uot_reg_marginal"], rng)
+                                    train_cfg["uot_reg_marginal"], rng,
+                                    stats=coupling_stats)
             # One t PER SAMPLE. Drawing a single scalar for the whole batch gives
             # the time axis one sample per step instead of `batch_size`, so [0, 1]
             # is covered sparsely and the gradient is far noisier. Inference then
@@ -469,6 +471,17 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         log(f"  stage2 epoch {epoch + 1:3d}/{train_cfg['stage2_epochs']}  "
             f"[{phase:7s}] loss {total / max(count, 1):.5f}  "
             f"fm {total_match / max(count, 1):.5f}{extra}")
+        if coupling_stats["fallbacks"]:
+            share = coupling_stats["fallbacks"] / max(coupling_stats["plans"], 1)
+            log(f"  [warn] OT plan degenerate on {coupling_stats['fallbacks']} of "
+                f"{coupling_stats['plans']} batches - those pairs were drawn at random")
+            limit = train_cfg.get("coupling_fallback_max", 0.05)
+            if share > limit:
+                raise RuntimeError(
+                    f"{share:.0%} of this epoch's OT plans were degenerate (limit "
+                    f"{limit:.0%}), so the coupling is effectively random. Check "
+                    f"train.uot_reg against the cost scale - coupling.py normalises "
+                    f"costs by their maximum.")
 
         # Written to a DIFFERENT name than checkpoint.pt on purpose: run.sh treats
         # checkpoint.pt as "this run finished" and refuses to start over one, so a

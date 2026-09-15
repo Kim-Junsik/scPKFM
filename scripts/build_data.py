@@ -144,7 +144,13 @@ def main() -> None:
         conditions, config["data"]["control_label"])
 
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    adata.write_h5ad(cache_path, compression="gzip")
+    # Temporary name, then rename. run.sh only checks that the cache EXISTS, so a
+    # half-written file under the final name was opened by a concurrent run, which
+    # failed on the HDF5 lock (errno 11) - or could have read it short.
+    stem = cache_path[:-len(".h5ad")] if cache_path.endswith(".h5ad") else cache_path
+    partial = f"{stem}.tmp-{os.getpid()}.h5ad"
+    adata.write_h5ad(partial, compression="gzip")
+    os.replace(partial, cache_path)
     size_mb = os.path.getsize(cache_path) / 1e6
     print(f"\n-> wrote {cache_path}  ({size_mb:.0f} MB)")
 

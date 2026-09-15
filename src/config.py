@@ -71,9 +71,13 @@ DEFAULTS: dict[str, Any] = {
         # scored - how a validation run keeps the real test set out of the model
         # while scoring something else.
         "exclude_conditions": None,
-        # source=list only. true scores splits.COMBOSCIPLEX_VALIDATION and excludes
-        # scDFM's seven, so design choices are made without scoring the test set.
+        # Development split, so design choices are made without scoring a reported
+        # test set. source=list (combosciplex): scores COMBOSCIPLEX_VALIDATION, or
+        # COMBOSCIPLEX_VALIDATION_FOLDS[validation_fold], and excludes scDFM's seven.
+        # source=reference_pkl (Norman, additive fold 0 only): scores
+        # NORMAN_VALIDATION[0] and excludes that fold's test doubles.
         "validation": False,
+        "validation_fold": None,  # combosciplex: 0-2, or null for the legacy pair
         "reference_pkl": "data/norman/split_results.pkl",
         "obs_key": "split",
         "obs_test_value": "test",
@@ -326,6 +330,12 @@ DEFAULTS: dict[str, Any] = {
         "coupling": "uot",  # uot | ot | random (random is a control only)
         "uot_reg": 0.05,
         "uot_reg_marginal": 1.0,
+        # A degenerate plan (non-finite, or no mass) falls back to random pairing for
+        # that batch. It is counted and logged per epoch, and training stops when a
+        # larger share of an epoch's batches fell back: the fallback used to be
+        # silent, and a reg too small for the cost scale makes it happen on every
+        # batch (measured 600/600 without cost normalisation at reg 0.1).
+        "coupling_fallback_max": 0.05,
         # 0 = fit the latent standardisation once before stage 2 and keep it.
         #
         # Do not turn this on without a reason. Refitting mid-training moves the

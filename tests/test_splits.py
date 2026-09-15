@@ -363,3 +363,107 @@ def test_held_out_conditions_cover_the_excluded_ones(combosciplex_validation_con
     held = splits.held_out_conditions(combosciplex_validation_config)
     assert set(splits.SCDFM_COMBOSCIPLEX_TEST) <= held
     assert set(splits.COMBOSCIPLEX_VALIDATION) <= held
+
+
+# ---------------------------------------------------------------- development validation sets
+def _norman_validation_config(config, fold=0):
+    import copy
+    validation = copy.deepcopy(config)
+    validation["split"]["validation"] = True
+    validation["split"]["fold"] = fold
+    validation["split"]["method"] = "additive"
+    return validation
+
+
+def test_norman_validation_resplits_only_fold_zero(config, reference):
+    loaded = splits.folds(_norman_validation_config(config), "additive")
+    dev = loaded[0]
+    assert dev["test"] == splits.NORMAN_VALIDATION[0]
+    assert dev["excluded"] == list(reference[0]["test"])
+    assert not set(dev["test"]) & set(dev["train"])
+    assert not set(dev["excluded"]) & set(dev["train"])
+    assert set(dev["train"]) | set(dev["test"]) == set(reference[0]["train"])
+    for i in range(1, len(reference)):
+        assert list(loaded[i]["test"]) == list(reference[i]["test"]), f"fold {i} changed"
+
+
+def test_norman_validation_leaves_the_reference_untouched(config, reference):
+    splits.folds(_norman_validation_config(config), "additive")
+    again = splits.folds(config, "additive")
+    assert list(again[0]["test"]) == list(reference[0]["test"])
+
+
+def test_norman_validation_is_defined_for_fold_zero_only(config):
+    with pytest.raises(ValueError, match="fold"):
+        splits.folds(_norman_validation_config(config, fold=1), "additive")
+
+
+def test_norman_validation_refuses_combinations(config):
+    with pytest.raises(ValueError, match="additive only"):
+        splits.folds(_norman_validation_config(config), "combinations")
+
+
+@pytest.mark.parametrize("method", ["additive"])
+def test_norman_validation_training_never_sees_validation_or_test(config, method):
+    cache = config["data"]["cache_h5ad"]
+    if not os.path.exists(cache):
+        pytest.skip(f"{cache} not built")
+    import anndata as ad
+    import numpy as np
+    from src.eval import baselines
+
+    conditions = ad.read_h5ad(cache, backed="r").obs["condition"].astype(str).to_numpy()
+    stats = baselines.ConditionMeans(np.zeros((len(conditions), 1), dtype=np.float32),
+                                     conditions)
+    fold = splits.folds(_norman_validation_config(config), method)[0]
+    allowed = baselines.training_conditions(stats, fold, method)
+    assert not set(allowed) & (set(fold["test"]) | set(fold["excluded"]))
+
+
+def test_norman_validation_doubles_are_scorable(config):
+    """Every validation double and both of its singles exist in the data, so the
+    additive reference and resid_R2 are defined for all fifteen."""
+    raw = config["data"]["raw_h5ad"]
+    if not os.path.exists(raw):
+        pytest.skip(f"{raw} not present")
+    import anndata as ad
+    present = set(ad.read_h5ad(raw, backed="r").obs["condition"].astype(str))
+    for double in splits.NORMAN_VALIDATION[0]:
+        assert double in present, double
+        for gene in double.split("+"):
+            assert f"{gene}+ctrl" in present, gene
+
+
+def test_norman_held_out_conditions_cover_validation_and_tables(config):
+    held = splits.held_out_conditions(_norman_validation_config(config))
+    assert set(splits.NORMAN_VALIDATION[0]) <= held
+    assert splits.held_out_conditions(config) <= held
+
+
+@pytest.mark.parametrize("fold", [0, 1, 2])
+def test_combosciplex_validation_fold_selects_its_set(combosciplex_validation_config, fold):
+    import copy
+    chosen = copy.deepcopy(combosciplex_validation_config)
+    chosen["split"]["validation_fold"] = fold
+    loaded = splits.folds(chosen)[0]
+    assert loaded["test"] == splits.COMBOSCIPLEX_VALIDATION_FOLDS[fold]
+    assert loaded["excluded"] == splits.SCDFM_COMBOSCIPLEX_TEST
+    assert not (set(loaded["test"]) | set(loaded["excluded"])) & set(loaded["train"])
+    for pair in loaded["test"]:
+        for drug in pair.split("+"):
+            assert any(drug in c.split("+") for c in loaded["train"]), (fold, drug)
+
+
+def test_combosciplex_validation_folds_are_disjoint_and_clear_of_the_test_set():
+    flat = [c for fold in splits.COMBOSCIPLEX_VALIDATION_FOLDS for c in fold]
+    assert len(flat) == len(set(flat)) == 12
+    assert not set(flat) & set(splits.SCDFM_COMBOSCIPLEX_TEST)
+    assert set(splits.COMBOSCIPLEX_VALIDATION) <= set(flat)
+
+
+def test_combosciplex_validation_fold_out_of_range(combosciplex_validation_config):
+    import copy
+    broken = copy.deepcopy(combosciplex_validation_config)
+    broken["split"]["validation_fold"] = 3
+    with pytest.raises(ValueError, match="validation_fold"):
+        splits.folds(broken)

@@ -252,10 +252,16 @@ GENERATOR_RANK=${GENERATOR_RANK:-null}      # null | integer. A_a = U_a V_a inst
 SHARED_RANK=${SHARED_RANK:-64}   # shared_basis only: m, the modes every perturbation shares
 PRIVATE_RANK=${PRIVATE_RANK:-8}  # shared_basis only: p, rank of each perturbation's own part.
                                  # Both enter the run name, so arms cannot collide.
-VALIDATION=${VALIDATION:-0}      # combosciplex only. 1 scores splits.COMBOSCIPLEX_VALIDATION
-                                 # and excludes scDFM's seven from training, for design
-                                 # decisions that never score the test set. Enters the
-                                 # cache and run names.
+VALIDATION=${VALIDATION:-0}      # 1 = development split: design decisions without scoring a
+                                 # reported test set. combosciplex scores a validation set
+                                 # and excludes scDFM's seven; Norman (--method additive
+                                 # --fold 0 only) scores splits.NORMAN_VALIDATION and
+                                 # excludes the fold's test doubles. Enters cache/run names.
+VAL_FOLD=${VAL_FOLD:-}           # combosciplex --validation: 0-2 selects
+                                 # splits.COMBOSCIPLEX_VALIDATION_FOLDS; empty = legacy pair.
+COUPLING=${COUPLING:-uot}        # uot | ot | random. Non-defaults enter the run name.
+UOT_REG=${UOT_REG:-0.05}         # Sinkhorn entropy on costs normalised by their maximum.
+                                 # At 0.05 a source cell spreads over ~38 of 48 targets.
 
 N_GEN=${N_GEN:-1024}               # control cells transported per condition at eval time.
 INFER_TOP_GENE=${INFER_TOP_GENE:-1000}      # gene subset the reported table is scored on.
@@ -305,7 +311,10 @@ usage() {
     --generator-rank N     null | integer
     --shared-rank N        shared_basis modes m       (default 64)
     --private-rank N       shared_basis private p     (default 8)
-    --validation           combosciplex: score the validation pair, exclude the test seven
+    --validation           development split (see VALIDATION above)
+    --val-fold N           combosciplex validation fold 0-2 (default: legacy pair)
+    --coupling KIND        uot | ot | random          (default uot)
+    --uot-reg F            Sinkhorn entropy           (default 0.05)
 
     --stage1 N             autoencoding epochs        (default 30)
     --stage2 N             flow-matching epochs       (default 200)
@@ -355,6 +364,9 @@ while [ $# -gt 0 ]; do
     --shared-rank)        SHARED_RANK=$2; shift 2 ;;
     --private-rank)       PRIVATE_RANK=$2; shift 2 ;;
     --validation)         VALIDATION=1; shift ;;
+    --val-fold)           VAL_FOLD=$2; shift 2 ;;
+    --coupling)           COUPLING=$2; shift 2 ;;
+    --uot-reg)            UOT_REG=$2; shift 2 ;;
     --stage1)             STAGE1=$2; shift 2 ;;
     --stage2)             STAGE2=$2; shift 2 ;;
     --warmup)             WARMUP=$2; shift 2 ;;
@@ -394,7 +406,15 @@ case "$DATASET" in
     SPLIT_TAG=""
     NORM_ARGS=""
     if [ "$VALIDATION" = "1" ]; then
-      echo "--validation is defined for combosciplex only" >&2
+      if [ "$METHOD" != "additive" ] || [ "$FOLD" != "0" ]; then
+        echo "Norman --validation is defined for --method additive --fold 0 only" >&2
+        exit 1
+      fi
+      SPLIT_ARGS="$SPLIT_ARGS split.validation=true"
+      SPLIT_TAG=_nval
+    fi
+    if [ -n "$VAL_FOLD" ]; then
+      echo "--val-fold is defined for combosciplex only" >&2
       exit 1
     fi
     ;;
@@ -420,6 +440,13 @@ case "$DATASET" in
     if [ "$VALIDATION" = "1" ]; then
       SPLIT_ARGS="$SPLIT_ARGS split.validation=true"
       SPLIT_TAG=_scdfm7val
+      if [ -n "$VAL_FOLD" ]; then
+        SPLIT_ARGS="$SPLIT_ARGS split.validation_fold=$VAL_FOLD"
+        SPLIT_TAG=_scdfm7val${VAL_FOLD}
+      fi
+    elif [ -n "$VAL_FOLD" ]; then
+      echo "--val-fold needs --validation" >&2
+      exit 1
     fi
     if [ "$FOLD" != "0" ]; then
       echo "combosciplex has one fold; --fold must be 0 (got $FOLD)" >&2
@@ -442,7 +469,13 @@ GEN_TAG=$GENERATOR
 if [ "$GENERATOR" = "shared_basis" ]; then
   GEN_TAG="shared_m${SHARED_RANK}p${PRIVATE_RANK}"
 fi
-RUN=${TAG}${SUFFIX}_${GEN_TAG}_${COMPOSITION}_f${FOLD}
+COUP_TAG=""
+if [ "$COUPLING" != "uot" ]; then
+  COUP_TAG="_${COUPLING}"
+elif [ "$UOT_REG" != "0.05" ]; then
+  COUP_TAG="_reg${UOT_REG}"
+fi
+RUN=${TAG}${SUFFIX}_${GEN_TAG}${COUP_TAG}_${COMPOSITION}_f${FOLD}
 
 # The cache is NOT named that way: it must differ whenever the gene selection
 # differs, and STRICT_SPLIT excludes the held-out conditions from HVG selection,
@@ -461,7 +494,7 @@ echo "  mmd=$MMD_WEIGHT"
 echo "  generator=$GENERATOR composition=$COMPOSITION"
 echo "  init_vae_from=${INIT_VAE_FROM:-(none - stage 1 will train)}"
 echo "  readout=$LATENT_READOUT rank=$GENERATOR_RANK shared_rank=$SHARED_RANK private_rank=$PRIVATE_RANK"
-echo "  validation=$VALIDATION"
+echo "  validation=$VALIDATION val_fold=${VAL_FOLD:-legacy} coupling=$COUPLING uot_reg=$UOT_REG"
 echo "  strict_split=$STRICT_SPLIT n_gen=$N_GEN device=$DEVICE"
 echo ""
 
@@ -494,6 +527,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
     data.hvg_criterion=$HVG_CRITERION $SPLIT_ARGS $NORM_ARGS \
     split.fold=$FOLD \
     train.batch_size=$BATCH train.lr=$LR \
+    train.coupling=$COUPLING train.uot_reg=$UOT_REG \
     train.stage1_epochs=$STAGE1 train.stage2_epochs=$STAGE2 \
     train.single_warmup_epochs=$WARMUP train.device=$DEVICE \
     train.endpoint_weight=$ENDPOINT_WEIGHT train.mmd_weight=$MMD_WEIGHT \

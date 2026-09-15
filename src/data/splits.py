@@ -142,6 +142,61 @@ COMBOSCIPLEX_VALIDATION = [
     "Panobinostat+SRT2104",
 ]
 
+# ---- development validation sets (phase 0) ------------------------------------
+# Design decisions are made on these and never on a reported test set.
+#
+# combosciplex: the 12 training combinations whose two drugs both keep a training
+# condition when the combination is held out, split into three folds of four by a
+# seeded shuffle (random.seed(0)) such that each fold is valid on its own. The two
+# test-shaped pairs above sit in folds 0 and 2. The pair itself stays available as
+# the legacy set (validation_fold null) so the shared-basis runs reproduce.
+COMBOSCIPLEX_VALIDATION_FOLDS = [
+    ["Panobinostat+SRT2104", "Panobinostat+Alvespimycin",
+     "SRT3025+Cediranib", "Givinostat+Dasatinib"],
+    ["Dacinostat+Dasatinib", "Givinostat+Cediranib",
+     "Panobinostat+SRT3025", "Panobinostat+PCI-34051"],
+    ["Dacinostat+PCI-34051", "Givinostat+SRT2104",
+     "Cediranib+PCI-34051", "Panobinostat+Dasatinib"],
+]
+
+# Norman: the five additive folds are independent 70/30 draws, so nearly every
+# double is a test condition somewhere - only PLK4+STIL is scored by no fold of
+# Table 1 or Table 2, and no validation set can be clean for every fold. These are
+# the 15 training doubles of additive fold 0 (both singles present) that appear the
+# FEWEST times as a test double or held-out gene in the other folds of either
+# table: 21 appearances in total, 8 in Table 1 and 13 in Table 2. Folds 1-3 tie on
+# exposure; fold 1 is avoided because it is the easiest fold and the one earlier
+# tuning concentrated on. The residual overlap is a disclosed limitation.
+NORMAN_VALIDATION = {
+    0: ["PLK4+STIL", "POU3F2+FOXL2", "RHOXF2+ZBTB25", "TMSB4X+BAK1",
+        "CDKN1C+CDKN1B", "POU3F2+CBFA2T3", "PRDM1+CBFA2T3", "RHOXF2+SET",
+        "BCL2L11+TGFBR2", "MAP2K3+SLC38A2", "TBX3+TBX2", "BCL2L11+BAK1",
+        "FOXF1+FOXL2", "FOXL2+MEIS1", "ZNF318+FOXL2"],
+}
+
+
+def norman_validation(reference: list[dict[str, Any]], fold: int) -> list[dict[str, Any]]:
+    """The additive folds with `fold` re-split for development.
+
+    The dev fold scores NORMAN_VALIDATION[fold] and excludes its own test doubles
+    from training without scoring them, recorded as fold["excluded"]. Every other
+    fold is returned untouched.
+    """
+    if fold not in NORMAN_VALIDATION:
+        raise ValueError(f"Norman validation is defined for additive fold(s) "
+                         f"{sorted(NORMAN_VALIDATION)}, not fold {fold}")
+    validation = list(NORMAN_VALIDATION[fold])
+    source = reference[fold]
+    missing = [d for d in validation if d not in source["train"]]
+    if missing:
+        raise ValueError(f"validation doubles are not training doubles of fold {fold}: "
+                         f"{missing}")
+    held = set(validation)
+    derived = list(reference)
+    derived[fold] = {"train": [d for d in source["train"] if d not in held],
+                     "test": validation, "excluded": list(source["test"])}
+    return derived
+
 
 def folds_from_list(config: dict) -> list[dict[str, Any]]:
     """One fold whose test set is an explicit list of conditions.
@@ -172,7 +227,16 @@ def folds_from_list(config: dict) -> list[dict[str, Any]]:
 
     split_cfg = config["split"]
     if split_cfg.get("validation"):
-        test = list(split_cfg.get("test_conditions") or COMBOSCIPLEX_VALIDATION)
+        chosen = split_cfg.get("validation_fold")
+        if chosen is None:
+            scored = COMBOSCIPLEX_VALIDATION
+        elif 0 <= int(chosen) < len(COMBOSCIPLEX_VALIDATION_FOLDS):
+            scored = COMBOSCIPLEX_VALIDATION_FOLDS[int(chosen)]
+        else:
+            raise ValueError(f"split.validation_fold must be 0-"
+                             f"{len(COMBOSCIPLEX_VALIDATION_FOLDS) - 1} or null, "
+                             f"got {chosen!r}")
+        test = list(split_cfg.get("test_conditions") or scored)
         excluded = list(split_cfg.get("exclude_conditions") or SCDFM_COMBOSCIPLEX_TEST)
     else:
         test = list(split_cfg.get("test_conditions") or SCDFM_COMBOSCIPLEX_TEST)
@@ -314,6 +378,11 @@ def folds(config: dict, method: str | None = None) -> list[dict[str, Any]]:
     if source == "generated":
         return folds_generated(config)
     reference = load(config["split"]["reference_pkl"])
+    if config["split"].get("validation"):
+        if method != "additive":
+            raise ValueError("split.validation on the reference split is defined for "
+                             "method=additive only")
+        return norman_validation(reference, int(config["split"]["fold"]))
     if method == "additive":
         return reference
     if method == "combinations":
@@ -414,7 +483,14 @@ def held_out_conditions(config: dict) -> set[str]:
     that is safe everywhere beats per-split artifacts that can be mixed up.
     """
     excluded: set[str] = set()
+    # Validation re-splits one development fold and is undefined for combinations
+    # on the reference split, so the tables' own folds are read with it switched
+    # off and the development fold is added on top.
+    plain = {**config, "split": {**config["split"], "validation": False}}
     for method in ("additive", "combinations"):
-        for fold in folds(config, method):
+        for fold in folds(plain, method):
+            excluded |= set(fold["test"]) | set(fold.get("excluded", ()))
+    if config["split"].get("validation"):
+        for fold in folds(config, "additive"):
             excluded |= set(fold["test"]) | set(fold.get("excluded", ()))
     return excluded
