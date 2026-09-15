@@ -67,6 +67,13 @@ DEFAULTS: dict[str, Any] = {
         #                condition with it.
         "source": "reference_pkl",  # reference_pkl | obs_column | generated | list
         "test_conditions": None,  # source=list only; null = scDFM's combosciplex seven
+        # source=list only. Removed from training and from gene selection but NOT
+        # scored - how a validation run keeps the real test set out of the model
+        # while scoring something else.
+        "exclude_conditions": None,
+        # source=list only. true scores splits.COMBOSCIPLEX_VALIDATION and excludes
+        # scDFM's seven, so design choices are made without scoring the test set.
+        "validation": False,
         "reference_pkl": "data/norman/split_results.pkl",
         "obs_key": "split",
         "obs_test_value": "test",
@@ -126,8 +133,15 @@ DEFAULTS: dict[str, Any] = {
         # differ in capacity AND in linear-vs-nonlinear form at once, so that
         # attribution is not isolated - the reading that capacity mattered rests
         # on the more expressive arm being the one that lost.
-        "generator": "affine",  # affine | neural_field
+        "generator": "affine",  # affine | neural_field | shared_basis
         "generator_hidden": [256, 256],  # neural_field trunk only
+        # shared_basis  u_a = s(t)*(U diag(c_a) V z + P_a Q_a z + b_a). Still one
+        #               linear (Koopman) operator per perturbation, but built on m
+        #               modes every perturbation shares, with a rank-p private
+        #               part. m=0, p=r is the affine generator at rank r. See
+        #               generators.SharedBasisGenerator for the measurement behind it.
+        "shared_rank": 64,  # m; shared_basis only
+        "private_rank": 8,  # p; shared_basis only, 0 = shared modes alone
         # How the per-perturbation fields combine.
         # additive  v = sum_a u_a. First-order BCH, and the measured default.
         # learned   v = sum_a u_a + rho(sum_a phi(u_a)). Learns the composition

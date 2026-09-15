@@ -276,7 +276,8 @@ def training_conditions(stats: ConditionMeans, fold: dict, method: str) -> list[
     Norman's additive and combinations folds the result is unchanged.
     """
     singles = [c for c in stats.mean if stats.naming.is_single(c)]
-    held = set(fold["test"]) | set(fold.get("held_out_singles", ()))
+    held = (set(fold["test"]) | set(fold.get("held_out_singles", ()))
+            | set(fold.get("excluded", ())))
     base = fold["train_doubles"] if method == "combinations" else fold["train"]
     # Order kept, duplicates dropped: a source whose train list already carries
     # singles (obs_column, list) would otherwise sample each of them twice.

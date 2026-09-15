@@ -214,7 +214,7 @@ COMPOSITION=${COMPOSITION:-learned}     # additive | learned
                          # UNTESTED. Three structured terms have been added to
                          # this model and none improved it.
 
-GENERATOR=${GENERATOR:-affine}         # affine | neural_field
+GENERATOR=${GENERATOR:-affine}         # affine | neural_field | shared_basis
                          # affine        u_a = s(t)·(A_a z + b_a). One operator PER
                          #               perturbation, 4,160 parameters each. This
                          #               is the Koopman form and the default.
@@ -248,6 +248,14 @@ GENERATOR_RANK=${GENERATOR_RANK:-null}      # null | integer. A_a = U_a V_a inst
                          # At LATENT_READOUT=pathway the full operator is K^2 per
                          # perturbation (~74,000 at K=272, 7.5 M over 101 of them),
                          # so rank 16 brings it back to roughly the dense cost.
+
+SHARED_RANK=${SHARED_RANK:-64}   # shared_basis only: m, the modes every perturbation shares
+PRIVATE_RANK=${PRIVATE_RANK:-8}  # shared_basis only: p, rank of each perturbation's own part.
+                                 # Both enter the run name, so arms cannot collide.
+VALIDATION=${VALIDATION:-0}      # combosciplex only. 1 scores splits.COMBOSCIPLEX_VALIDATION
+                                 # and excludes scDFM's seven from training, for design
+                                 # decisions that never score the test set. Enters the
+                                 # cache and run names.
 
 N_GEN=${N_GEN:-1024}               # control cells transported per condition at eval time.
 INFER_TOP_GENE=${INFER_TOP_GENE:-1000}      # gene subset the reported table is scored on.
@@ -291,10 +299,13 @@ usage() {
     --fold N               0-4                        (default 1)
 
     --anchor KIND          none | additive | ridge    (default none)
-    --generator KIND       affine | neural_field
+    --generator KIND       affine | neural_field | shared_basis
     --composition KIND     additive | learned
     --latent-readout KIND  dense | pathway
     --generator-rank N     null | integer
+    --shared-rank N        shared_basis modes m       (default 64)
+    --private-rank N       shared_basis private p     (default 8)
+    --validation           combosciplex: score the validation pair, exclude the test seven
 
     --stage1 N             autoencoding epochs        (default 30)
     --stage2 N             flow-matching epochs       (default 200)
@@ -341,6 +352,9 @@ while [ $# -gt 0 ]; do
     --composition)        COMPOSITION=$2; shift 2 ;;
     --latent-readout)     LATENT_READOUT=$2; shift 2 ;;
     --generator-rank)     GENERATOR_RANK=$2; shift 2 ;;
+    --shared-rank)        SHARED_RANK=$2; shift 2 ;;
+    --private-rank)       PRIVATE_RANK=$2; shift 2 ;;
+    --validation)         VALIDATION=1; shift ;;
     --stage1)             STAGE1=$2; shift 2 ;;
     --stage2)             STAGE2=$2; shift 2 ;;
     --warmup)             WARMUP=$2; shift 2 ;;
@@ -379,6 +393,10 @@ case "$DATASET" in
     SPLIT_ARGS="split.source=reference_pkl split.reference_pkl=data/norman/split_results.pkl split.method=$METHOD"
     SPLIT_TAG=""
     NORM_ARGS=""
+    if [ "$VALIDATION" = "1" ]; then
+      echo "--validation is defined for combosciplex only" >&2
+      exit 1
+    fi
     ;;
   combosciplex)
     RAW=data/combosciplex/combosciplex.h5ad
@@ -399,6 +417,10 @@ case "$DATASET" in
     # The shipped X is normalised to 10,000 per cell and puts L2 on a scale 1.5x
     # the published one (Control L2 8.2540 vs 5.3716; renormalised 5.3260).
     NORM_ARGS="data.normalise_from_counts=counts"
+    if [ "$VALIDATION" = "1" ]; then
+      SPLIT_ARGS="$SPLIT_ARGS split.validation=true"
+      SPLIT_TAG=_scdfm7val
+    fi
     if [ "$FOLD" != "0" ]; then
       echo "combosciplex has one fold; --fold must be 0 (got $FOLD)" >&2
       exit 1
@@ -416,7 +438,11 @@ SUFFIX=""
 [ "$DATASET" = "norman" ] || SUFFIX="${SUFFIX}_${DATASET}"
 SUFFIX="${SUFFIX}${SPLIT_TAG}"
 [ "$METHOD" = "additive" ] || SUFFIX="${SUFFIX}_${METHOD}"
-RUN=${TAG}${SUFFIX}_${GENERATOR}_${COMPOSITION}_f${FOLD}
+GEN_TAG=$GENERATOR
+if [ "$GENERATOR" = "shared_basis" ]; then
+  GEN_TAG="shared_m${SHARED_RANK}p${PRIVATE_RANK}"
+fi
+RUN=${TAG}${SUFFIX}_${GEN_TAG}_${COMPOSITION}_f${FOLD}
 
 # The cache is NOT named that way: it must differ whenever the gene selection
 # differs, and STRICT_SPLIT excludes the held-out conditions from HVG selection,
@@ -434,7 +460,8 @@ echo "  endpoint=$ENDPOINT_WEIGHT resid=$RESID_WEIGHT steps=$RESID_STEPS"
 echo "  mmd=$MMD_WEIGHT"
 echo "  generator=$GENERATOR composition=$COMPOSITION"
 echo "  init_vae_from=${INIT_VAE_FROM:-(none - stage 1 will train)}"
-echo "  readout=$LATENT_READOUT rank=$GENERATOR_RANK"
+echo "  readout=$LATENT_READOUT rank=$GENERATOR_RANK shared_rank=$SHARED_RANK private_rank=$PRIVATE_RANK"
+echo "  validation=$VALIDATION"
 echo "  strict_split=$STRICT_SPLIT n_gen=$N_GEN device=$DEVICE"
 echo ""
 
@@ -476,6 +503,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
     model.generator=$GENERATOR model.composition=$COMPOSITION \
     ${INIT_VAE_FROM:+train.init_vae_from=$INIT_VAE_FROM} \
     model.latent_readout=$LATENT_READOUT model.generator_rank=$GENERATOR_RANK \
+    model.shared_rank=$SHARED_RANK model.private_rank=$PRIVATE_RANK \
     model.anchor=$ANCHOR train.seed=$SEED \
     ${MASK_L1:+model.mask_l1=$MASK_L1} \
     ${HURDLE_MAGNITUDE:+model.hurdle_magnitude=$HURDLE_MAGNITUDE} \

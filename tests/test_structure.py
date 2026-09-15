@@ -180,3 +180,122 @@ def test_learned_composition_actually_changes_the_field(state):
     field = build(composition="learned")
     plain = field.generator(z, t, 1) + field.generator(z, t, 4)
     assert not torch.allclose(field(z, t, [1, 4]), plain, atol=1e-4)
+
+
+# ---------------------------------------------------------------- shared basis generator
+from src.models.generators import AffineGenerator, SharedBasisGenerator  # noqa: E402
+
+SHARED, PRIVATE = 3, 2
+
+
+def build_shared(composition: str = "additive", shared_rank: int = SHARED,
+                 private_rank: int = PRIVATE, randomise: bool = True) -> PKFMField:
+    config = config_module.load([f"model.latent_dim={LATENT}",
+                                 f"model.composition={composition}",
+                                 "model.generator=shared_basis",
+                                 f"model.shared_rank={shared_rank}",
+                                 f"model.private_rank={private_rank}"])
+    torch.manual_seed(0)
+    field = PKFMField(config, N_PERTURBATIONS)
+    if composition == "learned":
+        with torch.no_grad():
+            field.compose.rho[-1].weight.normal_(0.0, 0.2)
+            field.compose.rho[-1].bias.normal_(0.0, 0.2)
+    # U, P_a and b start at zero and c_a at one, so an untrained field is null and
+    # perturbation-independent. Fill every piece or the tests below pass trivially.
+    if randomise:
+        with torch.no_grad():
+            for name, parameter in field.generator.named_parameters():
+                if not name.startswith("time_scale"):
+                    parameter.normal_(0.0, 0.3)
+    return field
+
+
+def test_shared_basis_starts_as_the_null_field(state):
+    z, t = state
+    field = build_shared(randomise=False)
+    for pert in range(N_PERTURBATIONS):
+        assert torch.equal(field.generator(z, t, pert), torch.zeros_like(z))
+
+
+@pytest.mark.parametrize("composition", COMPOSITIONS)
+def test_shared_basis_keeps_the_structural_guarantees(state, composition):
+    """Control is zero, a single is its generator, order does not matter."""
+    z, t = state
+    field = build_shared(composition=composition)
+    assert torch.equal(field(z, t, []), torch.zeros_like(z))
+    assert torch.allclose(field(z, t, [2]), field.generator(z, t, 2), atol=1e-6)
+    assert torch.allclose(field(z, t, [1, 4]), field(z, t, [4, 1]), atol=1e-6)
+
+
+def test_shared_basis_composition_is_the_sum_of_generators(state):
+    z, t = state
+    field = build_shared()
+    expected = field.generator(z, t, 1) + field.generator(z, t, 4)
+    assert torch.allclose(field(z, t, [1, 4]), expected, atol=1e-6)
+
+
+@pytest.mark.parametrize("composition", COMPOSITIONS)
+def test_shared_basis_has_no_parameter_indexed_by_a_pair(composition):
+    field = build_shared(composition=composition)
+    for name, parameter in field.named_parameters():
+        assert N_PERTURBATIONS ** 2 not in parameter.shape, name
+
+
+def test_shared_basis_is_one_linear_operator_per_perturbation(state):
+    """Koopman form: the factors act on z exactly as the matrix A_a does."""
+    z, _ = state
+    generator = build_shared().generator
+    for pert in range(N_PERTURBATIONS):
+        assert torch.allclose(generator.operator(z, pert),
+                              z @ generator.matrix(pert).T, atol=1e-5)
+
+
+def test_shared_modes_are_actually_shared(state):
+    """Moving the shared basis moves every perturbation's field."""
+    z, t = state
+    field = build_shared()
+    before = [field.generator(z, t, pert).clone() for pert in range(N_PERTURBATIONS)]
+    with torch.no_grad():
+        field.generator.basis_u.add_(0.5)
+    for pert in range(N_PERTURBATIONS):
+        assert not torch.allclose(field.generator(z, t, pert), before[pert], atol=1e-4), pert
+
+
+def test_shared_basis_flow_map_is_non_additive(state):
+    z, _ = state
+    field = build_shared()
+    both = integrate(field, z, [1, 4], n_steps=8)
+    residual = both - integrate(field, z, [1], n_steps=8) - integrate(field, z, [4], n_steps=8) + z
+    assert residual.abs().max() > 1e-3
+
+
+def test_shared_basis_without_shared_modes_is_the_affine_generator(state):
+    """m=0, p=r reproduces AffineGenerator(rank=r): the old model is the special case."""
+    z, t = state
+    torch.manual_seed(0)
+    affine = AffineGenerator(N_PERTURBATIONS, LATENT, 32, rank=PRIVATE)
+    shared = SharedBasisGenerator(N_PERTURBATIONS, LATENT, 32,
+                                  shared_rank=0, private_rank=PRIVATE)
+    with torch.no_grad():
+        affine.u.normal_(0.0, 0.3)
+        affine.b.normal_(0.0, 0.3)
+        shared.private_u.copy_(affine.u)
+        shared.private_v.copy_(affine.v)
+        shared.b.copy_(affine.b)
+    shared.time_scale.load_state_dict(affine.time_scale.state_dict())
+    for pert in range(N_PERTURBATIONS):
+        assert torch.allclose(shared(z, t, pert), affine(z, t, pert), atol=1e-6), pert
+
+
+def test_shared_basis_refuses_generator_rank():
+    config = config_module.load([f"model.latent_dim={LATENT}",
+                                 "model.generator=shared_basis",
+                                 "model.generator_rank=4"])
+    with pytest.raises(ValueError, match="generator_rank"):
+        PKFMField(config, N_PERTURBATIONS)
+
+
+def test_shared_basis_needs_some_rank():
+    with pytest.raises(ValueError, match="shared_rank"):
+        SharedBasisGenerator(N_PERTURBATIONS, LATENT, 32, shared_rank=0, private_rank=0)

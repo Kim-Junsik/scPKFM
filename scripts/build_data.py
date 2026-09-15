@@ -93,7 +93,7 @@ def main() -> None:
         # the name local to main() and broken the earlier splits.validate() call.
         method = config["split"]["method"]
         fold = splits.folds(config, method)[config["split"]["fold"]]
-        held = set(fold["test"])
+        held = set(fold["test"]) | set(fold.get("excluded", ()))
         keep = np.flatnonzero(~np.isin(conditions, list(held)))
         print(f"  excluding {n_obs - len(keep):,} cells of {len(held)} held-out "
               f"conditions from gene selection (fold {config['split']['fold']})")

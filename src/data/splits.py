@@ -129,6 +129,19 @@ SCDFM_COMBOSCIPLEX_TEST = [
     "control+Dacinostat",
 ]
 
+# Two training combinations held out to make design decisions on combosciplex
+# without scoring scDFM's seven. Chosen by the STRUCTURE of the test set, never by
+# its scores: every test combination is Panobinostat + X where X appears in
+# training only next to Givinostat, another HDAC inhibitor. Both pairs below have
+# that shape, and both drugs of each keep training conditions after removal
+# (Dasatinib: single, Givinostat+, Dacinostat+; SRT2104: single, Givinostat+;
+# Panobinostat keeps four), so they stay combination problems rather than
+# unseen-drug problems.
+COMBOSCIPLEX_VALIDATION = [
+    "Panobinostat+Dasatinib",
+    "Panobinostat+SRT2104",
+]
+
 
 def folds_from_list(config: dict) -> list[dict[str, Any]]:
     """One fold whose test set is an explicit list of conditions.
@@ -146,26 +159,40 @@ def folds_from_list(config: dict) -> list[dict[str, Any]]:
     out singles. They are recorded in `held_out_singles`, and
     baselines.training_conditions excludes every test condition explicitly -
     without that, its "every single is trainable" rule would put them back.
+
+    `split.exclude_conditions` are removed from training (and from gene
+    selection) without being scored, and recorded as fold["excluded"].
+    `split.validation=true` fills the two lists for a design run: the scored set
+    becomes COMBOSCIPLEX_VALIDATION and scDFM's seven are excluded, so the model
+    never sees the test conditions and nothing scores them.
     """
     # Local import: conventions is a leaf module, but keeping it out of module
     # scope means this file's import order can never become circular.
     from .conventions import ConditionNaming
 
     split_cfg = config["split"]
-    test = list(split_cfg.get("test_conditions") or SCDFM_COMBOSCIPLEX_TEST)
-    if len(set(test)) != len(test):
-        raise ValueError(f"split.test_conditions repeats a condition: {test}")
+    if split_cfg.get("validation"):
+        test = list(split_cfg.get("test_conditions") or COMBOSCIPLEX_VALIDATION)
+        excluded = list(split_cfg.get("exclude_conditions") or SCDFM_COMBOSCIPLEX_TEST)
+    else:
+        test = list(split_cfg.get("test_conditions") or SCDFM_COMBOSCIPLEX_TEST)
+        excluded = list(split_cfg.get("exclude_conditions") or [])
+    for name, values in (("test_conditions", test), ("exclude_conditions", excluded)):
+        if len(set(values)) != len(values):
+            raise ValueError(f"split.{name} repeats a condition: {values}")
+    both = set(test) & set(excluded)
+    if both:
+        raise ValueError(f"conditions are both scored and excluded: {sorted(both)}")
     present = set(_read_obs(config)["condition"].astype(str).tolist())
-    missing = [c for c in test if c not in present]
+    missing = [c for c in test + excluded if c not in present]
     if missing:
-        raise ValueError(f"split.test_conditions names conditions absent from the "
-                         f"data: {missing}")
+        raise ValueError(f"the split names conditions absent from the data: {missing}")
     naming = ConditionNaming.from_config(config)
-    held = set(test)
+    held = set(test) | set(excluded)
     train = sorted(c for c in present if c not in held)
-    return [{"train": train, "test": test,
+    return [{"train": train, "test": test, "excluded": excluded,
              "train_doubles": [c for c in train if naming.is_double(c)],
-             "held_out_singles": [c for c in test if naming.is_single(c)]}]
+             "held_out_singles": [c for c in test + excluded if naming.is_single(c)]}]
 
 
 def folds_generated(config: dict) -> list[dict[str, Any]]:
@@ -325,7 +352,7 @@ def validate(config: dict) -> dict[str, Any]:
 
     if source == "list":
         fold = folds_from_list(config)[0]
-        overlap = set(fold["train"]) & set(fold["test"])
+        overlap = set(fold["train"]) & (set(fold["test"]) | set(fold["excluded"]))
         if overlap:
             raise ValueError(f"list split puts {overlap} in both train and test")
         return {"n_folds": 1, "reference_ok": True, "combinations_derived": False,
@@ -389,5 +416,5 @@ def held_out_conditions(config: dict) -> set[str]:
     excluded: set[str] = set()
     for method in ("additive", "combinations"):
         for fold in folds(config, method):
-            excluded |= set(fold["test"])
+            excluded |= set(fold["test"]) | set(fold.get("excluded", ()))
     return excluded

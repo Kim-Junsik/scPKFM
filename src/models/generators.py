@@ -138,6 +138,94 @@ class AffineGenerator(nn.Module):
         return self.u[pert] @ self.v[pert]
 
 
+class SharedBasisGenerator(nn.Module):
+    """u_a(z,t) = s(t) * (U diag(c_a) V z + P_a Q_a z + b_a).
+
+    A Koopman operator per perturbation, built mostly from modes every
+    perturbation shares, plus a small private part.
+
+    WHY. On combosciplex the transport error is almost entirely generalisation
+    (scripts/diagnose_train_gap.py): training conditions sit 0.20-0.26 L2 above
+    the decoder's ceiling, held-out ones 1.10-1.32. Every test combination pairs
+    Panobinostat with a drug seen in ONE training condition, and AffineGenerator
+    hands that drug a dedicated rank-64 operator - 33,282 parameters fitted from
+    one condition. Here most of each operator comes from shared modes and a
+    perturbation only chooses how much of each mode it uses.
+
+    STILL KOOPMAN. The field is linear in z for every perturbation, so
+    A_a = U diag(c_a) V + P_a Q_a is one generator and the flow map is its matrix
+    exponential, as for AffineGenerator. Composition stays in the same algebra:
+    the shared parts of a and b add as U diag(c_a + c_b) V, so an unseen pair is
+    built from coefficients each drug learned in whatever conditions it appeared.
+
+    CAPACITY. m + 2*K*p + K parameters per perturbation, plus 2*K*m shared. At
+    K=258, m=64, p=8 that is 4,450 per drug against 33,282; on Norman (K~312),
+    5,368 against 40,248 - still above the 4,160 per perturbation of the affine
+    generator that beat the shared neural field 6-0, so the capacity that won
+    there is not given up.
+
+    m=0 with p=r is AffineGenerator(rank=r) term for term, which
+    tests/test_structure.py asserts: the current model is the special case.
+
+    INITIALISATION. U and P_a start at zero, so the field is the null field at
+    step 0 like every other generator here. V and Q_a start small and random so
+    the products still pass gradient (see AffineGenerator). c_a starts at one:
+    every perturbation begins using every mode equally, so the basis first learns
+    the response the perturbations have in common and the coefficients
+    differentiate from there. U diag(c) V is invariant to U -> kU, c -> c/k, so
+    read A_a as a whole rather than U or c_a alone.
+    """
+
+    def __init__(self, n_perturbations: int, latent_dim: int, time_embed_dim: int,
+                 shared_rank: int, private_rank: int):
+        super().__init__()
+        if shared_rank < 0 or private_rank < 0 or shared_rank + private_rank == 0:
+            raise ValueError(
+                f"shared_basis needs shared_rank + private_rank > 0, both >= 0 "
+                f"(got shared_rank={shared_rank}, private_rank={private_rank})")
+        self.latent_dim = latent_dim
+        self.shared_rank = shared_rank
+        self.private_rank = private_rank
+        self.time = TimeEmbedding(time_embed_dim)
+        if shared_rank:
+            self.basis_u = nn.Parameter(torch.zeros(latent_dim, shared_rank))
+            self.basis_v = nn.Parameter(torch.randn(shared_rank, latent_dim) * 0.02)
+            self.coef = nn.Parameter(torch.ones(n_perturbations, shared_rank))
+        if private_rank:
+            self.private_u = nn.Parameter(
+                torch.zeros(n_perturbations, latent_dim, private_rank))
+            self.private_v = nn.Parameter(
+                torch.randn(n_perturbations, private_rank, latent_dim) * 0.02)
+        self.b = nn.Parameter(torch.zeros(n_perturbations, latent_dim))
+        self.time_scale = nn.Sequential(nn.Linear(time_embed_dim, 32), nn.GELU(),
+                                        nn.Linear(32, 1))
+
+    def operator(self, z: torch.Tensor, pert: int) -> torch.Tensor:
+        """A_a z, computed through the factors without forming A_a."""
+        out = torch.zeros_like(z)
+        if self.shared_rank:
+            out = out + ((z @ self.basis_v.T) * self.coef[pert]) @ self.basis_u.T
+        if self.private_rank:
+            out = out + (z @ self.private_v[pert].T) @ self.private_u[pert].T
+        return out
+
+    def forward(self, z: torch.Tensor, t: torch.Tensor, pert: int) -> torch.Tensor:
+        # time_scale sees time only and returns a scalar, so for fixed t the map
+        # z -> u is still linear - the same argument as AffineGenerator.forward.
+        scale = 1.0 + self.time_scale(self.time(t))
+        return scale * (self.operator(z, pert) + self.b[pert])
+
+    def matrix(self, pert: int) -> torch.Tensor:
+        """A_a as a dense [D, D] matrix: the pathway interaction figure."""
+        full = torch.zeros(self.latent_dim, self.latent_dim,
+                           device=self.b.device, dtype=self.b.dtype)
+        if self.shared_rank:
+            full = full + (self.basis_u * self.coef[pert]) @ self.basis_v
+        if self.private_rank:
+            full = full + self.private_u[pert] @ self.private_v[pert]
+        return full
+
+
 class NeuralFieldGenerator(nn.Module):
     """u_a(z,t) = f([z, phi(t), e_a]) with f SHARED and e_a learned per perturbation.
 
@@ -199,6 +287,14 @@ def build_generator(config: dict, n_perturbations: int,
     if kind == "affine":
         return AffineGenerator(n_perturbations, width, model_cfg["time_embed_dim"],
                                model_cfg.get("generator_rank"))
+    if kind == "shared_basis":
+        if model_cfg.get("generator_rank") is not None:
+            raise ValueError(
+                "generator_rank sizes the affine generator; shared_basis is sized by "
+                "model.shared_rank and model.private_rank. Set generator_rank to null "
+                "(drop --generator-rank).")
+        return SharedBasisGenerator(n_perturbations, width, model_cfg["time_embed_dim"],
+                                    model_cfg["shared_rank"], model_cfg["private_rank"])
     if kind == "neural_field":
         if model_cfg.get("generator_rank") is not None:
             raise ValueError(

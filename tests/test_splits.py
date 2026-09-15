@@ -312,3 +312,54 @@ def test_additive_training_conditions_are_train_doubles_then_every_single(config
     for i, fold in enumerate(splits.folds(config, "additive")):
         allowed = baselines.training_conditions(stats, fold, "additive")
         assert allowed == list(fold["train"]) + singles, f"fold {i}"
+
+
+# ---------------------------------------------------------------- combosciplex validation split
+@pytest.fixture(scope="module")
+def combosciplex_validation_config(combosciplex_config):
+    import copy
+    validation = copy.deepcopy(combosciplex_config)
+    validation["split"]["validation"] = True
+    return validation
+
+
+def test_validation_scores_the_pair_and_excludes_the_test_seven(combosciplex_validation_config):
+    fold = splits.folds(combosciplex_validation_config)[0]
+    assert fold["test"] == splits.COMBOSCIPLEX_VALIDATION
+    assert fold["excluded"] == splits.SCDFM_COMBOSCIPLEX_TEST
+    assert not (set(fold["test"]) | set(fold["excluded"])) & set(fold["train"])
+
+
+@pytest.mark.parametrize("method", ["additive", "combinations"])
+def test_validation_training_never_sees_test_or_validation(
+        combosciplex_validation_config, combosciplex_stats, method):
+    from src.eval import baselines
+
+    fold = splits.folds(combosciplex_validation_config)[0]
+    allowed = baselines.training_conditions(combosciplex_stats, fold, method)
+    assert not set(allowed) & (set(fold["test"]) | set(fold["excluded"])), method
+    # Both held-out single drugs of the test seven, not just the combinations.
+    assert not set(allowed) & set(SCDFM_SINGLE_DRUGS), method
+
+
+def test_validation_pairs_stay_combination_problems(combosciplex_validation_config):
+    """Every drug of a validation pair keeps a training condition, as every drug
+    of the test combinations does - otherwise it would be an unseen-drug test."""
+    fold = splits.folds(combosciplex_validation_config)[0]
+    for pair in fold["test"]:
+        for drug in pair.split("+"):
+            assert any(drug in c.split("+") for c in fold["train"]), drug
+
+
+def test_list_rejects_a_condition_both_scored_and_excluded(combosciplex_config):
+    import copy
+    broken = copy.deepcopy(combosciplex_config)
+    broken["split"]["exclude_conditions"] = [splits.SCDFM_COMBOSCIPLEX_TEST[0]]
+    with pytest.raises(ValueError, match="both scored and excluded"):
+        splits.folds(broken)
+
+
+def test_held_out_conditions_cover_the_excluded_ones(combosciplex_validation_config):
+    held = splits.held_out_conditions(combosciplex_validation_config)
+    assert set(splits.SCDFM_COMBOSCIPLEX_TEST) <= held
+    assert set(splits.COMBOSCIPLEX_VALIDATION) <= held

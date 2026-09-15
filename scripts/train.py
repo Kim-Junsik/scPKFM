@@ -140,6 +140,16 @@ def main() -> None:
                 + "\n  ".join(mismatches)
                 + "\nTrain stage 1 here instead (unset train.init_vae_from).")
         vae.load_state_dict(checkpoint["vae"])
+        # stage1.pt is written BEFORE stage 2 fits the latent standardisation, so
+        # its buffers still hold the identity (mean 0, std 1) - and stage 2 reuses
+        # whatever standardisation the loaded encoder carries. Loading it would run
+        # the field in unstandardised coordinates, unlike the run the encoder came
+        # from, without any error. A fitted standardisation is never exactly this.
+        if bool(torch.all(vae.latent_mean == 0)) and bool(torch.all(vae.latent_std == 1)):
+            raise ValueError(
+                f"{path} carries no latent standardisation - it is a stage-1 file. "
+                "Point train.init_vae_from at the finished run directory (its "
+                "checkpoint.pt) instead.")
         log(f"  from {path}")
         log(f"  latent standardisation came with it: "
             f"mean per-dim std {float(vae.latent_std.mean()):.5f}")
