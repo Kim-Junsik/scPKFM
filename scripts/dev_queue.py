@@ -11,7 +11,12 @@ then, on the server, one tmux window per GPU:
 
 Every run is a development run: Norman on its fold-0 validation set
 (splits.NORMAN_VALIDATION) and combosciplex on each of its validation folds
-(splits.COMBOSCIPLEX_VALIDATION_FOLDS). No reported test set is ever scored.
+(splits.COMBOSCIPLEX_VALIDATION_FOLDS; --combo-set sv adds one held-out single per
+fold). No reported test set is ever scored.
+
+Norman arms start from exact OT (--norman-coupling ot, decided on experiment c1);
+pass --norman-coupling uot to plan them on UOT again. Experiments planned before
+that decision (p0n, c1n) used UOT for their base arm.
 
 One ENCODER job per (dataset, validation fold) trains stage 1 and fits the latent
 standardisation (--stage2 0); every arm and seed loads it. The runs being compared
@@ -44,8 +49,20 @@ COMBOSCIPLEX_FOLDS = (0, 1, 2)
 NAME = re.compile(r"^[A-Za-z0-9]+$")
 
 
-def dataset_groups(datasets: list[str], combo_folds) -> list[tuple[str, str, list[str]]]:
-    """(dataset, group label, split flags) for every validation set requested."""
+COMBO_SETS = ("cv", "sv")
+COUPLINGS = ("ot", "uot")
+
+
+def dataset_groups(datasets: list[str], combo_folds,
+                   combo_set: str = "cv") -> list[tuple[str, str, list[str]]]:
+    """(dataset, group label, split flags) for every validation set requested.
+
+    combo_set cv scores combinations only (splits.COMBOSCIPLEX_VALIDATION_FOLDS);
+    sv also scores one held-out single per fold (COMBOSCIPLEX_VALIDATION_SINGLES).
+    The two train on different conditions, so they never share an encoder.
+    """
+    if combo_set not in COMBO_SETS:
+        raise ValueError(f"unknown combosciplex set {combo_set!r} ({' | '.join(COMBO_SETS)})")
     groups = []
     for dataset in datasets:
         if dataset == "norman":
@@ -53,12 +70,27 @@ def dataset_groups(datasets: list[str], combo_folds) -> list[tuple[str, str, lis
                                               "--fold", "0", "--validation"]))
         elif dataset == "combosciplex":
             for fold in combo_folds:
-                groups.append(("combosciplex", f"cv{fold}",
-                               ["--dataset", "combosciplex", "--fold", "0",
-                                "--validation", "--val-fold", str(fold)]))
+                flags = ["--dataset", "combosciplex", "--fold", "0",
+                         "--validation", "--val-fold", str(fold)]
+                if combo_set == "sv":
+                    flags.append("--val-singles")
+                groups.append(("combosciplex", f"{combo_set}{fold}", flags))
         else:
             raise ValueError(f"unknown dataset {dataset!r} (norman | combosciplex)")
     return groups
+
+
+def dataset_flags(norman_coupling: str = "ot") -> dict[str, list[str]]:
+    """Per-dataset defaults every arm of that dataset starts from.
+
+    Decided 2026-09-17 on the c1 coupling experiment: exact OT for Norman
+    (-0.066 L2, ~7 SE), UOT 0.05 for combosciplex (exact OT +0.019, ~4 SE worse).
+    Kept a flag, not a code default, so Norman can go back to UOT at any time.
+    An arm that passes its own --coupling still wins: run.sh keeps the last value.
+    """
+    if norman_coupling not in COUPLINGS:
+        raise ValueError(f"unknown Norman coupling {norman_coupling!r} ({' | '.join(COUPLINGS)})")
+    return {"norman": ["--coupling", norman_coupling]}
 
 
 def without(flags: list[str], flag: str, takes_value: bool) -> list[str]:
@@ -77,7 +109,8 @@ def without(flags: list[str], flag: str, takes_value: bool) -> list[str]:
 
 def plan_jobs(name: str, datasets: list[str], arms: dict[str, str], seeds: list[int],
               gpus: list[int], combo_folds=COMBOSCIPLEX_FOLDS,
-              encoder_name: str | None = None, extra: list[str] = ()) -> list[dict]:
+              encoder_name: str | None = None, extra: list[str] = (),
+              combo_set: str = "cv", norman_coupling: str = "ot") -> list[dict]:
     labels = [name, *arms] + ([encoder_name] if encoder_name else [])
     for label in labels:
         if not NAME.match(label):
@@ -85,7 +118,8 @@ def plan_jobs(name: str, datasets: list[str], arms: dict[str, str], seeds: list[
     if not gpus:
         raise ValueError("at least one GPU is needed")
     encoder_name = encoder_name or name
-    groups = dataset_groups(datasets, combo_folds)
+    groups = dataset_groups(datasets, combo_folds, combo_set)
+    defaults = dataset_flags(norman_coupling)
     extra = list(extra)
 
     encoders = []
@@ -115,7 +149,8 @@ def plan_jobs(name: str, datasets: list[str], arms: dict[str, str], seeds: list[
                 arm_jobs.append({"kind": "arm", "tag": f"{name}_{arm}_{group}_s{seed}",
                                  "dataset": dataset, "group": group, "arm": arm,
                                  "seed": seed, "encoder": f"{encoder_name}_enc_{group}",
-                                 "flags": (base + split_flags + extra
+                                 "flags": (base + split_flags
+                                           + defaults.get(dataset, []) + extra
                                            + ["--seed", str(seed)] + tokens)})
 
     # Encoders spread over the GPUs first so they start together; arms follow
@@ -177,6 +212,11 @@ def main() -> None:
     parser.add_argument("--name", required=True, help="experiment name (letters, digits)")
     parser.add_argument("--datasets", nargs="+", default=["norman", "combosciplex"])
     parser.add_argument("--combo-folds", nargs="+", type=int, default=list(COMBOSCIPLEX_FOLDS))
+    parser.add_argument("--combo-set", choices=COMBO_SETS, default="cv",
+                        help="combosciplex validation folds: cv (combinations only) or "
+                             "sv (plus one held-out single per fold)")
+    parser.add_argument("--norman-coupling", choices=COUPLINGS, default="ot",
+                        help="coupling every Norman arm starts from (decided: ot)")
     parser.add_argument("--arms", nargs="+", required=True,
                         help='name=flags, e.g. base= ot="--coupling ot"')
     parser.add_argument("--seeds", nargs="+", type=int, required=True)
@@ -193,7 +233,8 @@ def main() -> None:
         label, _, flags = item.partition("=")
         arms[label] = flags
     jobs = plan_jobs(args.name, args.datasets, arms, args.seeds, args.gpus,
-                     args.combo_folds, args.encoder_name, shlex.split(args.extra_flags))
+                     args.combo_folds, args.encoder_name, shlex.split(args.extra_flags),
+                     args.combo_set, args.norman_coupling)
     out_dir = write_queues(args.name, jobs, args.out)
 
     def shown(path: str) -> str:

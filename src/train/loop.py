@@ -25,6 +25,7 @@ from ..data.dataset import ConditionSampler, PerturbationData, condition_genes
 from ..models.flow import integrate
 from .coupling import sample_pairs
 from ..eval.scdfm_metrics import median_sigmas, mmd2_unbiased_multi_sigma
+from ..models.similarity import operator_graph_penalty, penalty_ramp
 
 
 def _to_device(array: np.ndarray, device: str) -> torch.Tensor:
@@ -302,6 +303,17 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
     resid_weight = train_cfg.get("resid_weight", 0.0)
     mmd_weight = train_cfg.get("mmd_weight", 0.0)
     endpoint_weight = train_cfg.get("endpoint_weight", 0.0)
+    # Operator-graph penalty (model.operator_graph_mode=penalty). Mix mode needs no
+    # loss term: the graph is inside the field.
+    graph_weight = 0.0
+    generator = getattr(field, "generator", None)
+    if getattr(generator, "graph", None) is not None and generator.graph_mode == "penalty":
+        graph_weight = train_cfg.get("operator_graph_weight", 0.0)
+        log(f"  operator-graph penalty: weight {graph_weight}, {len(generator.graph_edges())} "
+            f"edges, off for {train_cfg['single_warmup_epochs']} warm-up epochs then ramped "
+            f"over {train_cfg.get('operator_graph_ramp_epochs', 100)}")
+        if graph_weight <= 0:
+            log("  [warn] operator_graph_mode=penalty with weight 0: the graph does nothing")
 
     # ONE encoding pass shared by both target sets. Doing it inside each of them
     # encodes every condition twice, which is minutes of gpu time before stage 2
@@ -360,6 +372,10 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         totals_resid: list[float] = []
         totals_end: list[float] = []
         totals_mmd: list[float] = []
+        totals_graph: list[float] = []
+        graph_ramp = (penalty_ramp(epoch, train_cfg["single_warmup_epochs"],
+                                   train_cfg.get("operator_graph_ramp_epochs", 100))
+                      if graph_weight > 0 else 0.0)
         coupling_stats = {"plans": 0, "fallbacks": 0}
         for condition in conditions:
             source, target, _ = sampler.batch(condition)
@@ -454,6 +470,15 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
                 recon, _ = vae.loss(params0, x0, **_aux(x0, config))
                 loss = loss + train_cfg["stage2_recon_weight"] * recon
 
+            # Structurally similar perturbations' operators are pulled together.
+            # Recorded even before the ramp opens, so the log shows how far apart
+            # the operators drifted while unconstrained.
+            if graph_weight > 0:
+                graph_term = operator_graph_penalty(generator)
+                if graph_ramp > 0:
+                    loss = loss + graph_weight * graph_ramp * graph_term
+                totals_graph.append(float(graph_term))
+
             optimiser.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(parameters, train_cfg["grad_clip"])
@@ -468,6 +493,8 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         extra = (f"  mmd {np.mean(totals_mmd):.5f}" if totals_mmd else "")
         extra += (f"  end {np.mean(totals_end):.5f}" if totals_end else "")
         extra += (f"  resid {np.mean(totals_resid):.5f}" if totals_resid else "")
+        extra += (f"  graph {np.mean(totals_graph):.5f} (x{graph_ramp:.2f})"
+                  if totals_graph else "")
         log(f"  stage2 epoch {epoch + 1:3d}/{train_cfg['stage2_epochs']}  "
             f"[{phase:7s}] loss {total / max(count, 1):.5f}  "
             f"fm {total_match / max(count, 1):.5f}{extra}")

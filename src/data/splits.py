@@ -159,6 +159,27 @@ COMBOSCIPLEX_VALIDATION_FOLDS = [
      "Cediranib+PCI-34051", "Panobinostat+Dasatinib"],
 ]
 
+# The singles-aware folds ("sv"): fold i above plus ONE held-out training single.
+# Table 3 scores two single drugs, control+Alvespimycin and control+Dacinostat, and
+# neither drug is ever trained alone - each appears only inside 2 and 3 training
+# combinations. The folds above score combinations only, so that block, the worst
+# one of Table 3, was invisible to validation.
+#
+# Chosen by structure alone, never by a score: once fold i is also held out, the
+# drug must keep exactly 2 training combinations and no training single, as the
+# test singles do. Only four drugs have a training single. Givinostat keeps 8
+# combinations, far easier than the test; holding out Panobinostat's single would
+# unanchor every Panobinostat+X validation combination, which the test
+# combinations are not. Dasatinib keeps 2 in every fold, SRT2104 only in fold 1.
+# One single per fold keeps three of the four training singles.
+#
+# Known limits, recorded before any run: two of the three are Dasatinib, whose
+# nearest structure is 0.21 ECFP4 Tanimoto (assets/drugs), while both test
+# singles have a close analogue; and validation combinations containing Dasatinib
+# lose their single anchor, so they are harder than their test counterparts.
+COMBOSCIPLEX_VALIDATION_SINGLES = ["control+Dasatinib", "control+SRT2104",
+                                   "control+Dasatinib"]
+
 # Norman: the five additive folds are independent 70/30 draws, so nearly every
 # double is a test condition somewhere - only PLK4+STIL is scored by no fold of
 # Table 1 or Table 2, and no validation set can be clean for every fold. These are
@@ -220,24 +241,34 @@ def folds_from_list(config: dict) -> list[dict[str, Any]]:
     `split.validation=true` fills the two lists for a design run: the scored set
     becomes COMBOSCIPLEX_VALIDATION and scDFM's seven are excluded, so the model
     never sees the test conditions and nothing scores them.
+    `split.validation_singles=true` adds COMBOSCIPLEX_VALIDATION_SINGLES[fold]
+    to the scored set of validation fold `split.validation_fold`.
     """
     # Local import: conventions is a leaf module, but keeping it out of module
     # scope means this file's import order can never become circular.
     from .conventions import ConditionNaming
 
     split_cfg = config["split"]
+    with_single = bool(split_cfg.get("validation_singles"))
     if split_cfg.get("validation"):
         chosen = split_cfg.get("validation_fold")
         if chosen is None:
+            if with_single:
+                raise ValueError("split.validation_singles needs split.validation_fold 0-"
+                                 f"{len(COMBOSCIPLEX_VALIDATION_FOLDS) - 1}")
             scored = COMBOSCIPLEX_VALIDATION
         elif 0 <= int(chosen) < len(COMBOSCIPLEX_VALIDATION_FOLDS):
-            scored = COMBOSCIPLEX_VALIDATION_FOLDS[int(chosen)]
+            scored = list(COMBOSCIPLEX_VALIDATION_FOLDS[int(chosen)])
+            if with_single:
+                scored.append(COMBOSCIPLEX_VALIDATION_SINGLES[int(chosen)])
         else:
             raise ValueError(f"split.validation_fold must be 0-"
                              f"{len(COMBOSCIPLEX_VALIDATION_FOLDS) - 1} or null, "
                              f"got {chosen!r}")
         test = list(split_cfg.get("test_conditions") or scored)
         excluded = list(split_cfg.get("exclude_conditions") or SCDFM_COMBOSCIPLEX_TEST)
+    elif with_single:
+        raise ValueError("split.validation_singles needs split.validation=true")
     else:
         test = list(split_cfg.get("test_conditions") or SCDFM_COMBOSCIPLEX_TEST)
         excluded = list(split_cfg.get("exclude_conditions") or [])
@@ -485,8 +516,10 @@ def held_out_conditions(config: dict) -> set[str]:
     excluded: set[str] = set()
     # Validation re-splits one development fold and is undefined for combinations
     # on the reference split, so the tables' own folds are read with it switched
-    # off and the development fold is added on top.
-    plain = {**config, "split": {**config["split"], "validation": False}}
+    # off and the development fold is added on top. validation_singles is part of
+    # the development split and is switched off with it.
+    plain = {**config, "split": {**config["split"], "validation": False,
+                                 "validation_singles": False}}
     for method in ("additive", "combinations"):
         for fold in folds(plain, method):
             excluded |= set(fold["test"]) | set(fold.get("excluded", ()))

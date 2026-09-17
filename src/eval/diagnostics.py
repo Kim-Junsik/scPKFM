@@ -107,7 +107,8 @@ def load_run(run_dir: str, device: str = "cpu", gate: str | None = None,
     if "field" not in checkpoint:
         vae.eval()
         return config, data, stats, fold, vae, None
-    field = PKFMField(config, data.n_perturbations, vae.latent_dim).to(device)
+    field = PKFMField(config, data.n_perturbations, vae.latent_dim,
+                      data.perturbations).to(device)
     field.load_state_dict(checkpoint["field"])
     # Rebuilt rather than unpickled from the checkpoint: it is a function of the
     # training conditions and the condition means, both of which this function has

@@ -257,7 +257,8 @@ def main() -> None:
 
         vae = build_backbone(config, data.n_genes, data.gene_names).to(device)
         vae.load_state_dict(checkpoint["vae"])
-        field = PKFMField(config, data.n_perturbations, vae.latent_dim).to(device)
+        field = PKFMField(config, data.n_perturbations, vae.latent_dim,
+                          data.perturbations).to(device)
         field.load_state_dict(checkpoint["field"])
 
         genes = None

@@ -105,7 +105,14 @@ def main() -> None:
         f"({held_out:,} held-out cells excluded)")
 
     vae = build_backbone(config, data.n_genes, data.gene_names).to(device)
-    field = PKFMField(config, data.n_perturbations, vae.latent_dim).to(device)
+    field = PKFMField(config, data.n_perturbations, vae.latent_dim,
+                      data.perturbations).to(device)
+    if getattr(field.generator, "graph", None) is not None:
+        from src.models.similarity import describe
+        log(f"operator graph ({field.generator.graph_mode}, "
+            f"threshold {config['model']['operator_graph_threshold']}, "
+            f"weight {config['train']['operator_graph_weight']}): "
+            + describe(field.generator.graph.cpu().numpy(), data.perturbations))
     log(f"backbone={config['model']['backbone']} head={config['model']['decoder_head']}")
     log(f"params: vae {sum(p.numel() for p in vae.parameters()):,}  "
         f"field {sum(p.numel() for p in field.parameters()):,}")

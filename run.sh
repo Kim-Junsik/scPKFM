@@ -259,9 +259,16 @@ VALIDATION=${VALIDATION:-0}      # 1 = development split: design decisions witho
                                  # excludes the fold's test doubles. Enters cache/run names.
 VAL_FOLD=${VAL_FOLD:-}           # combosciplex --validation: 0-2 selects
                                  # splits.COMBOSCIPLEX_VALIDATION_FOLDS; empty = legacy pair.
+VAL_SINGLES=${VAL_SINGLES:-0}    # 1 = combosciplex --validation --val-fold N also scores
+                                 # splits.COMBOSCIPLEX_VALIDATION_SINGLES[N] (the "sv" folds).
 COUPLING=${COUPLING:-uot}        # uot | ot | random. Non-defaults enter the run name.
 UOT_REG=${UOT_REG:-0.05}         # Sinkhorn entropy on costs normalised by their maximum.
                                  # At 0.05 a source cell spreads over ~38 of 48 targets.
+OPERATOR_GRAPH=${OPERATOR_GRAPH:-}  # similarity CSV coupling the operators, empty = none.
+                                 # combosciplex: assets/drugs/tanimoto_ecfp4_2048.csv
+GRAPH_MODE=${GRAPH_MODE:-penalty}   # penalty | mix (see src/models/similarity.py)
+GRAPH_WEIGHT=${GRAPH_WEIGHT:-0}     # penalty mode only
+GRAPH_THRESHOLD=${GRAPH_THRESHOLD:-0.25}
 
 N_GEN=${N_GEN:-1024}               # control cells transported per condition at eval time.
 INFER_TOP_GENE=${INFER_TOP_GENE:-1000}      # gene subset the reported table is scored on.
@@ -313,8 +320,13 @@ usage() {
     --private-rank N       shared_basis private p     (default 8)
     --validation           development split (see VALIDATION above)
     --val-fold N           combosciplex validation fold 0-2 (default: legacy pair)
+    --val-singles          with --val-fold: also score one held-out single (sv fold)
     --coupling KIND        uot | ot | random          (default uot)
     --uot-reg F            Sinkhorn entropy           (default 0.05)
+    --operator-graph PATH  similarity CSV coupling the operators (default none)
+    --graph-mode MODE      penalty | mix              (default penalty)
+    --graph-weight F       penalty weight             (default 0)
+    --graph-threshold F    edge threshold             (default 0.25)
 
     --stage1 N             autoencoding epochs        (default 30)
     --stage2 N             flow-matching epochs       (default 200)
@@ -365,8 +377,13 @@ while [ $# -gt 0 ]; do
     --private-rank)       PRIVATE_RANK=$2; shift 2 ;;
     --validation)         VALIDATION=1; shift ;;
     --val-fold)           VAL_FOLD=$2; shift 2 ;;
+    --val-singles)        VAL_SINGLES=1; shift ;;
     --coupling)           COUPLING=$2; shift 2 ;;
     --uot-reg)            UOT_REG=$2; shift 2 ;;
+    --operator-graph)     OPERATOR_GRAPH=$2; shift 2 ;;
+    --graph-mode)         GRAPH_MODE=$2; shift 2 ;;
+    --graph-weight)       GRAPH_WEIGHT=$2; shift 2 ;;
+    --graph-threshold)    GRAPH_THRESHOLD=$2; shift 2 ;;
     --stage1)             STAGE1=$2; shift 2 ;;
     --stage2)             STAGE2=$2; shift 2 ;;
     --warmup)             WARMUP=$2; shift 2 ;;
@@ -413,8 +430,8 @@ case "$DATASET" in
       SPLIT_ARGS="$SPLIT_ARGS split.validation=true"
       SPLIT_TAG=_nval
     fi
-    if [ -n "$VAL_FOLD" ]; then
-      echo "--val-fold is defined for combosciplex only" >&2
+    if [ -n "$VAL_FOLD" ] || [ "$VAL_SINGLES" = "1" ]; then
+      echo "--val-fold and --val-singles are defined for combosciplex only" >&2
       exit 1
     fi
     ;;
@@ -443,9 +460,18 @@ case "$DATASET" in
       if [ -n "$VAL_FOLD" ]; then
         SPLIT_ARGS="$SPLIT_ARGS split.validation_fold=$VAL_FOLD"
         SPLIT_TAG=_scdfm7val${VAL_FOLD}
+        if [ "$VAL_SINGLES" = "1" ]; then
+          # A different training set, so its own cache and run names: the cv folds'
+          # encoders and baselines stay reproducible next to it.
+          SPLIT_ARGS="$SPLIT_ARGS split.validation_singles=true"
+          SPLIT_TAG=_scdfm7sv${VAL_FOLD}
+        fi
+      elif [ "$VAL_SINGLES" = "1" ]; then
+        echo "--val-singles needs --val-fold" >&2
+        exit 1
       fi
-    elif [ -n "$VAL_FOLD" ]; then
-      echo "--val-fold needs --validation" >&2
+    elif [ -n "$VAL_FOLD" ] || [ "$VAL_SINGLES" = "1" ]; then
+      echo "--val-fold and --val-singles need --validation" >&2
       exit 1
     fi
     if [ "$FOLD" != "0" ]; then
@@ -475,7 +501,22 @@ if [ "$COUPLING" != "uot" ]; then
 elif [ "$UOT_REG" != "0.05" ]; then
   COUP_TAG="_reg${UOT_REG}"
 fi
-RUN=${TAG}${SUFFIX}_${GEN_TAG}${COUP_TAG}_${COMPOSITION}_f${FOLD}
+# An operator graph enters the name with its mode, weight and non-default threshold,
+# so the penalty arms at different weights and the mix arm never share a directory.
+GRAPH_TAG=""
+GRAPH_ARGS="model.operator_graph=null"
+if [ -n "$OPERATOR_GRAPH" ]; then
+  case "$GRAPH_MODE" in
+    penalty) GRAPH_TAG="_gpen${GRAPH_WEIGHT}" ;;
+    mix)     GRAPH_TAG="_gmix" ;;
+    *) echo "unknown --graph-mode $GRAPH_MODE (penalty | mix)" >&2; exit 1 ;;
+  esac
+  [ "$GRAPH_THRESHOLD" = "0.25" ] || GRAPH_TAG="${GRAPH_TAG}t${GRAPH_THRESHOLD}"
+  GRAPH_ARGS="model.operator_graph=$OPERATOR_GRAPH model.operator_graph_mode=$GRAPH_MODE"
+  GRAPH_ARGS="$GRAPH_ARGS model.operator_graph_threshold=$GRAPH_THRESHOLD"
+  GRAPH_ARGS="$GRAPH_ARGS train.operator_graph_weight=$GRAPH_WEIGHT"
+fi
+RUN=${TAG}${SUFFIX}_${GEN_TAG}${COUP_TAG}${GRAPH_TAG}_${COMPOSITION}_f${FOLD}
 
 # The cache is NOT named that way: it must differ whenever the gene selection
 # differs, and STRICT_SPLIT excludes the held-out conditions from HVG selection,
@@ -494,7 +535,8 @@ echo "  mmd=$MMD_WEIGHT"
 echo "  generator=$GENERATOR composition=$COMPOSITION"
 echo "  init_vae_from=${INIT_VAE_FROM:-(none - stage 1 will train)}"
 echo "  readout=$LATENT_READOUT rank=$GENERATOR_RANK shared_rank=$SHARED_RANK private_rank=$PRIVATE_RANK"
-echo "  validation=$VALIDATION val_fold=${VAL_FOLD:-legacy} coupling=$COUPLING uot_reg=$UOT_REG"
+echo "  validation=$VALIDATION val_fold=${VAL_FOLD:-legacy} val_singles=$VAL_SINGLES coupling=$COUPLING uot_reg=$UOT_REG"
+echo "  operator_graph=${OPERATOR_GRAPH:-none} mode=$GRAPH_MODE weight=$GRAPH_WEIGHT threshold=$GRAPH_THRESHOLD"
 echo "  strict_split=$STRICT_SPLIT n_gen=$N_GEN device=$DEVICE"
 echo ""
 
@@ -527,7 +569,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
     data.hvg_criterion=$HVG_CRITERION $SPLIT_ARGS $NORM_ARGS \
     split.fold=$FOLD \
     train.batch_size=$BATCH train.lr=$LR \
-    train.coupling=$COUPLING train.uot_reg=$UOT_REG \
+    train.coupling=$COUPLING train.uot_reg=$UOT_REG $GRAPH_ARGS \
     train.stage1_epochs=$STAGE1 train.stage2_epochs=$STAGE2 \
     train.single_warmup_epochs=$WARMUP train.device=$DEVICE \
     train.endpoint_weight=$ENDPOINT_WEIGHT train.mmd_weight=$MMD_WEIGHT \

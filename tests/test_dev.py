@@ -127,6 +127,44 @@ def test_names_with_underscores_are_refused():
         plan(arms={"bad_arm": ""})
 
 
+def test_sv_set_adds_the_single_flag_and_its_own_group_labels():
+    jobs = plan(datasets=["combosciplex"], combo_set="sv")
+    assert sorted({job["group"] for job in jobs}) == ["sv0", "sv1", "sv2"]
+    for job in jobs:
+        assert "--val-singles" in job["flags"]
+        assert job["flags"][job["flags"].index("--val-fold") + 1] == job["group"][2:]
+    for job in plan(datasets=["combosciplex"]):
+        assert "--val-singles" not in job["flags"]
+
+
+def test_sv_and_cv_never_share_an_encoder():
+    cv = {job["encoder"] for job in plan(datasets=["combosciplex"]) if job["kind"] == "arm"}
+    sv = {job["encoder"] for job in plan(datasets=["combosciplex"], combo_set="sv")
+          if job["kind"] == "arm"}
+    assert not cv & sv
+
+
+def test_norman_arms_start_from_exact_ot_and_an_arm_can_override_it():
+    for job in plan(arms={"base": "", "uot": "--coupling uot"}):
+        if job["kind"] != "arm":
+            continue
+        flags = job["flags"]
+        last = flags[len(flags) - 1 - flags[::-1].index("--coupling") + 1] \
+            if "--coupling" in flags else None
+        if job["dataset"] == "norman":
+            assert last == ("uot" if job["arm"] == "uot" else "ot")
+        else:
+            assert last == ("uot" if job["arm"] == "uot" else None)
+
+
+def test_norman_coupling_can_go_back_to_uot():
+    for job in plan(arms={"base": ""}, norman_coupling="uot"):
+        if job["kind"] == "arm" and job["dataset"] == "norman":
+            assert job["flags"][job["flags"].index("--coupling") + 1] == "uot"
+    with pytest.raises(ValueError):
+        plan(norman_coupling="exact")
+
+
 # ---------------------------------------------------------------- decision rule
 def stats(mean, se, n=6):
     return {"n": n, "mean": mean, "sd": se * np.sqrt(n), "se": se}
@@ -149,3 +187,38 @@ def test_rule_rejects_a_gain_that_hurts_the_other_dataset():
 
 def test_rule_waits_for_pairs():
     assert dev_score.decide({"norman": stats(-0.1, float("nan"), n=1)}) == "insufficient pairs"
+
+
+# ---------------------------------------------------------------- families and blocks
+def test_families_drop_the_fold_number_and_keep_cv_apart_from_sv():
+    assert dev_score.family("norman", "nval") == "norman:nval"
+    assert dev_score.family("combosciplex", "cv2") == "combosciplex:cv"
+    assert dev_score.family("combosciplex", "sv0") == "combosciplex:sv"
+
+
+def test_weighted_l2_is_table_three_weighting_only_when_a_single_was_scored():
+    assert dev_score.weighted_l2({"double": 2.0, "single": None}) == 2.0
+    assert dev_score.weighted_l2({"double": 1.93, "single": 2.66}) == pytest.approx(
+        (5 * 1.93 + 2 * 2.66) / 7)
+
+
+def test_rule_rejects_a_family_gain_that_hurts_a_block():
+    """The weighted gain passes, but the single block is worse by more than 1 SE."""
+    assert dev_score.decide(
+        {"combosciplex:sv": stats(-0.06, 0.02), "norman:nval": stats(0.0, 0.01)},
+        {"combosciplex:sv": {"double": stats(-0.12, 0.03),
+                             "single": stats(0.10, 0.05)}}) == "reject (hurts a block)"
+
+
+def test_rule_tolerates_a_noisy_block_within_one_se():
+    assert dev_score.decide(
+        {"combosciplex:sv": stats(-0.06, 0.02)},
+        {"combosciplex:sv": {"double": stats(-0.10, 0.03),
+                             "single": stats(0.04, 0.05)}}) == "ADOPT"
+
+
+def test_rule_waits_for_block_pairs():
+    assert dev_score.decide(
+        {"combosciplex:sv": stats(-0.06, 0.02)},
+        {"combosciplex:sv": {"double": stats(-0.1, 0.03),
+                             "single": stats(0.0, float("nan"), n=1)}}) == "insufficient pairs"

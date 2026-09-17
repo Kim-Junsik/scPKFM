@@ -66,11 +66,35 @@ class AffineGenerator(nn.Module):
     """
 
     def __init__(self, n_perturbations: int, latent_dim: int, time_embed_dim: int,
-                 rank: int | None = None):
+                 rank: int | None = None, graph=None, graph_mode: str | None = None):
+        """`graph` is an optional [P, P] perturbation similarity graph (see
+        src/models/similarity.py). With graph_mode="mix" every operator and bias is
+        the weighted mean of the perturbation's own and its neighbours'; with
+        "penalty" the field is unchanged and the graph is only read by the loss.
+        """
         super().__init__()
         self.latent_dim = latent_dim
         self.rank = rank
         self.time = TimeEmbedding(time_embed_dim)
+        if graph is None:
+            self.register_buffer("graph", None)
+            self.graph_mode = None
+        else:
+            from .similarity import GRAPH_MODES
+            if graph_mode not in GRAPH_MODES:
+                raise ValueError(f"operator_graph_mode must be one of {GRAPH_MODES}, "
+                                 f"got {graph_mode!r}")
+            graph = torch.as_tensor(graph, dtype=torch.float32)
+            if graph.shape != (n_perturbations, n_perturbations):
+                raise ValueError(f"operator graph is {tuple(graph.shape)}, expected "
+                                 f"({n_perturbations}, {n_perturbations})")
+            # A buffer, so the graph a run trained with travels in its checkpoint.
+            self.register_buffer("graph", graph)
+            self.graph_mode = graph_mode
+            self._cache_neighbours()
+            # Loading a checkpoint replaces the buffer; the neighbour lists follow.
+            self.register_load_state_dict_post_hook(
+                lambda module, incompatible: module._cache_neighbours())
         # Start at zero: at initialisation every generator is the null field, so
         # the model begins as "predict no change" rather than as noise.
         if rank is None:
@@ -112,10 +136,46 @@ class AffineGenerator(nn.Module):
 
         The low-rank branch factorises A_a = U_a V_a. Still one linear map; only
         its storage changed.
+
+        With a mixing graph, A_a = (A_a_own + sum_b w_ab A_b_own) / (1 + sum_b w_ab):
+        a convex combination of linear maps, so still one linear map.
         """
+        if self.graph_mode != "mix" or not self._neighbours[pert]:
+            return self.own_operator(z, pert)
+        out, total = self.own_operator(z, pert), 1.0
+        for other, weight in self._neighbours[pert]:
+            out = out + weight * self.own_operator(z, other)
+            total += weight
+        return out / total
+
+    def own_operator(self, z: torch.Tensor, pert: int) -> torch.Tensor:
+        """A_a z from perturbation a's own parameters, ignoring any graph."""
         if self.rank is None:
             return z @ self.a[pert].T
         return (z @ self.v[pert].T) @ self.u[pert].T
+
+    def bias(self, pert: int) -> torch.Tensor:
+        """b_a, mixed over the graph exactly like the operator."""
+        if self.graph_mode != "mix" or not self._neighbours[pert]:
+            return self.b[pert]
+        out, total = self.b[pert], 1.0
+        for other, weight in self._neighbours[pert]:
+            out = out + weight * self.b[other]
+            total += weight
+        return out / total
+
+    def _cache_neighbours(self) -> None:
+        weights = self.graph.detach().cpu()
+        self._neighbours = [[(int(j), float(weights[i, j]))
+                             for j in torch.nonzero(weights[i]).flatten().tolist()]
+                            for i in range(weights.shape[0])]
+
+    def graph_edges(self) -> list[tuple[int, int, float]]:
+        """(a, b, w) for every edge, each pair once. Empty without a graph."""
+        if self.graph is None:
+            return []
+        return [(a, b, w) for a, pairs in enumerate(self._neighbours)
+                for b, w in pairs if b > a]
 
     def forward(self, z: torch.Tensor, t: torch.Tensor, pert: int) -> torch.Tensor:
         # `time_scale` IS an MLP, and it is the one thing here that could break
@@ -125,14 +185,25 @@ class AffineGenerator(nn.Module):
         # autonomous linear system's, traversed at a varying speed; feeding z into
         # this MLP would make the field nonlinear and void the Koopman reading.
         scale = 1.0 + self.time_scale(self.time(t))
-        return scale * (self.operator(z, pert) + self.b[pert])
+        return scale * (self.operator(z, pert) + self.bias(pert))
 
     def matrix(self, pert: int) -> torch.Tensor:
-        """A_a as a dense [D, D] matrix, whichever way it is stored.
+        """A_a as a dense [D, D] matrix, whichever way it is stored - the operator
+        the field actually applies, so mixed when the graph mixes.
 
         At latent_readout=pathway this is the figure: entry [i, j] is how much
         pathway j drives pathway i under perturbation a.
         """
+        if self.graph_mode != "mix" or not self._neighbours[pert]:
+            return self.own_matrix(pert)
+        out, total = self.own_matrix(pert), 1.0
+        for other, weight in self._neighbours[pert]:
+            out = out + weight * self.own_matrix(other)
+            total += weight
+        return out / total
+
+    def own_matrix(self, pert: int) -> torch.Tensor:
+        """Perturbation a's own dense operator, ignoring any graph."""
         if self.rank is None:
             return self.a[pert]
         return self.u[pert] @ self.v[pert]
@@ -274,19 +345,37 @@ class NeuralFieldGenerator(nn.Module):
 
 
 def build_generator(config: dict, n_perturbations: int,
-                    latent_dim: int | None = None) -> nn.Module:
+                    latent_dim: int | None = None,
+                    perturbations: list[str] | None = None) -> nn.Module:
     """`latent_dim` overrides the config value.
 
     latent_readout=pathway makes the encoder's latent width K rather than
     model.latent_dim, and the field has to match the encoder it is paired with,
     so callers pass vae.latent_dim rather than trusting the config.
+
+    `perturbations` are the names in index order (data.perturbations). They are
+    required when model.operator_graph is set, since the graph is keyed by name.
     """
     model_cfg = config["model"]
     width = model_cfg["latent_dim"] if latent_dim is None else latent_dim
     kind = model_cfg["generator"]
+    graph_path = model_cfg.get("operator_graph")
+    if graph_path and kind != "affine":
+        raise ValueError(f"model.operator_graph couples affine operators; generator "
+                         f"{kind!r} has none")
     if kind == "affine":
+        graph = None
+        if graph_path:
+            if perturbations is None or len(perturbations) != n_perturbations:
+                raise ValueError("model.operator_graph needs the perturbation names in "
+                                 "index order; pass data.perturbations")
+            from .similarity import operator_graph
+            graph = operator_graph(graph_path, model_cfg.get("operator_graph_threshold", 0.25),
+                                   list(perturbations))
         return AffineGenerator(n_perturbations, width, model_cfg["time_embed_dim"],
-                               model_cfg.get("generator_rank"))
+                               model_cfg.get("generator_rank"), graph,
+                               model_cfg.get("operator_graph_mode", "penalty") if graph_path
+                               else None)
     if kind == "shared_basis":
         if model_cfg.get("generator_rank") is not None:
             raise ValueError(

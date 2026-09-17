@@ -116,19 +116,23 @@ class PKFMField(nn.Module):
     """
 
     def __init__(self, config: dict, n_perturbations: int,
-                 latent_dim: int | None = None):
+                 latent_dim: int | None = None, perturbations: list[str] | None = None):
         """`latent_dim` overrides the config value.
 
         At latent_readout=pathway the encoder's width is the number of pathway
         tokens, not model.latent_dim, and the field must match the encoder it is
         paired with. Callers pass vae.latent_dim; leaving it None keeps the
         config value, which is correct for the dense readout.
+
+        `perturbations` (data.perturbations) names the indices; an operator graph
+        (model.operator_graph) is built from it.
         """
         super().__init__()
         model_cfg = config["model"]
         self.latent_dim = (model_cfg["latent_dim"] if latent_dim is None
                            else latent_dim)
-        self.generator = build_generator(config, n_perturbations, self.latent_dim)
+        self.generator = build_generator(config, n_perturbations, self.latent_dim,
+                                         perturbations)
 
         # With an anchor the source already carries sum_a u_a's displacement, so
         # the field must NOT reproduce it - see model.anchor in config.py.

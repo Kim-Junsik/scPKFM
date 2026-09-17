@@ -78,6 +78,10 @@ DEFAULTS: dict[str, Any] = {
         # NORMAN_VALIDATION[0] and excludes that fold's test doubles.
         "validation": False,
         "validation_fold": None,  # combosciplex: 0-2, or null for the legacy pair
+        # combosciplex only: also score splits.COMBOSCIPLEX_VALIDATION_SINGLES
+        # [validation_fold], one held-out training single, so the single-drug block
+        # of Table 3 has a validation counterpart. Needs validation_fold.
+        "validation_singles": False,
         "reference_pkl": "data/norman/split_results.pkl",
         "obs_key": "split",
         "obs_test_value": "test",
@@ -206,6 +210,17 @@ DEFAULTS: dict[str, Any] = {
         # perturbation (7.5 M over 101) against 4,160 at latent_dim=64.
         # rank 16 brings that back to roughly the dense-readout cost.
         "generator_rank": None,
+        # Perturbation similarity graph coupling the affine operators; see
+        # src/models/similarity.py. null = no graph (every operator isolated).
+        # combosciplex: assets/drugs/tanimoto_ecfp4_2048.csv (drug structure).
+        "operator_graph": None,
+        # Edges only above it: w = (s - threshold) / (1 - threshold). 0.25 is above
+        # the 95th percentile of all drug pairs and was fixed before any run.
+        "operator_graph_threshold": 0.25,
+        # penalty: the loss pulls neighbouring operators together (train.
+        #          operator_graph_weight); the field is unchanged.
+        # mix:     each operator is the weighted mean of its own and its neighbours'.
+        "operator_graph_mode": "penalty",
         # --- P-CAB mask (stage 3) ---
         "n_pathway_tokens": None,  # None = however many KEGG pathways survive
         "n_free_tokens": 101,
@@ -336,6 +351,12 @@ DEFAULTS: dict[str, Any] = {
         # silent, and a reg too small for the cost scale makes it happen on every
         # batch (measured 600/600 without cost normalisation at reg 0.1).
         "coupling_fallback_max": 0.05,
+        # Weight of the operator-graph penalty (model.operator_graph_mode=penalty).
+        # The penalty is a relative distance, so 1 is comparable to the flow-matching
+        # term. Off during the singles warm-up, then ramped linearly to full weight
+        # over operator_graph_ramp_epochs (similarity.penalty_ramp).
+        "operator_graph_weight": 0.0,
+        "operator_graph_ramp_epochs": 100,
         # 0 = fit the latent standardisation once before stage 2 and keep it.
         #
         # Do not turn this on without a reason. Refitting mid-training moves the

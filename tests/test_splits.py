@@ -467,3 +467,83 @@ def test_combosciplex_validation_fold_out_of_range(combosciplex_validation_confi
     broken["split"]["validation_fold"] = 3
     with pytest.raises(ValueError, match="validation_fold"):
         splits.folds(broken)
+
+
+# ---------------------------------------------------------------- singles-aware (sv) folds
+def _sv_fold(combosciplex_validation_config, fold):
+    import copy
+    chosen = copy.deepcopy(combosciplex_validation_config)
+    chosen["split"]["validation_fold"] = fold
+    chosen["split"]["validation_singles"] = True
+    return splits.folds(chosen)[0]
+
+
+@pytest.mark.parametrize("fold", [0, 1, 2])
+def test_sv_fold_is_its_cv_fold_plus_one_single(combosciplex_validation_config, fold):
+    loaded = _sv_fold(combosciplex_validation_config, fold)
+    single = splits.COMBOSCIPLEX_VALIDATION_SINGLES[fold]
+    assert loaded["test"] == splits.COMBOSCIPLEX_VALIDATION_FOLDS[fold] + [single]
+    assert loaded["excluded"] == splits.SCDFM_COMBOSCIPLEX_TEST
+    assert single in loaded["held_out_singles"]
+    assert not (set(loaded["test"]) | set(loaded["excluded"])) & set(loaded["train"])
+
+
+@pytest.mark.parametrize("fold", [0, 1, 2])
+def test_sv_single_has_the_shape_of_a_test_single(combosciplex_validation_config, fold):
+    """The pre-registered structure: the held-out drug is never trained alone and
+    stays in exactly two training combinations, as Alvespimycin (2) and
+    Dacinostat (3) do in Table 3."""
+    loaded = _sv_fold(combosciplex_validation_config, fold)
+    drug = splits.COMBOSCIPLEX_VALIDATION_SINGLES[fold].split("+")[1]
+    combos = [c for c in loaded["train"]
+              if drug in c.split("+") and not c.startswith("control+")]
+    assert len(combos) == 2, (fold, combos)
+    assert f"control+{drug}" not in loaded["train"]
+
+
+@pytest.mark.parametrize("fold", [0, 1, 2])
+def test_sv_training_never_sees_its_single(combosciplex_validation_config,
+                                           combosciplex_stats, fold):
+    from src.eval import baselines
+
+    loaded = _sv_fold(combosciplex_validation_config, fold)
+    for method in ("additive", "combinations"):
+        allowed = baselines.training_conditions(combosciplex_stats, loaded, method)
+        assert splits.COMBOSCIPLEX_VALIDATION_SINGLES[fold] not in allowed, method
+        assert not set(allowed) & (set(loaded["test"]) | set(loaded["excluded"])), method
+
+
+def test_sv_does_not_change_the_cv_folds(combosciplex_validation_config):
+    import copy
+    for fold in range(3):
+        chosen = copy.deepcopy(combosciplex_validation_config)
+        chosen["split"]["validation_fold"] = fold
+        assert splits.folds(chosen)[0]["test"] == splits.COMBOSCIPLEX_VALIDATION_FOLDS[fold]
+    assert all(len(f) == 4 for f in splits.COMBOSCIPLEX_VALIDATION_FOLDS)
+
+
+@pytest.mark.parametrize("fold", [0, 1, 2])
+def test_held_out_conditions_cover_the_sv_single(combosciplex_validation_config, fold):
+    """build_data calls this on the sv config; it must not trip the sv guard and
+    must list the held-out single with the rest."""
+    import copy
+    chosen = copy.deepcopy(combosciplex_validation_config)
+    chosen["split"]["validation_fold"] = fold
+    chosen["split"]["validation_singles"] = True
+    held = splits.held_out_conditions(chosen)
+    assert splits.COMBOSCIPLEX_VALIDATION_SINGLES[fold] in held
+    assert set(splits.COMBOSCIPLEX_VALIDATION_FOLDS[fold]) <= held
+    assert set(splits.SCDFM_COMBOSCIPLEX_TEST) <= held
+
+
+def test_validation_singles_needs_a_validation_fold(combosciplex_config,
+                                                    combosciplex_validation_config):
+    import copy
+    no_fold = copy.deepcopy(combosciplex_validation_config)
+    no_fold["split"]["validation_singles"] = True
+    with pytest.raises(ValueError, match="validation_fold"):
+        splits.folds(no_fold)
+    not_validation = copy.deepcopy(combosciplex_config)
+    not_validation["split"]["validation_singles"] = True
+    with pytest.raises(ValueError, match="validation=true"):
+        splits.folds(not_validation)
