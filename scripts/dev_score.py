@@ -86,18 +86,26 @@ def weighted_l2(blocks: dict[str, float]) -> float:
     return sum(TABLE3_WEIGHTS[b] * blocks[b] for b in BLOCKS)
 
 
-def score_run(run_dir: str, device: str, n_cells: int) -> dict[str, float | None]:
+def score_run(run_dir: str, device: str, n_cells: int,
+              rho_off: bool = False) -> dict[str, float | None]:
     """Mean L2 of the validation doubles and of the validation singles.
 
     One transport pass, doubles first. measure_transport draws its cells from one
     rng in condition order, so the doubles consume exactly the draws
     paper_table.compute_l2(..., group="double") consumes and their mean is
     bit-identical to it; the singles come after and cannot disturb it.
+
+    `rho_off` scores the same weights with the learned composition switched off
+    (v = sum_a u_a for combinations). The rng is reseeded identically, so a
+    run scored both ways is compared on the very same cells. Singles never use
+    rho, so their scores do not move.
     """
     from src.eval.diagnostics import (condition_groups, load_run, measure_transport,
                                       scdfm_eval_genes)
 
     config, data, stats, fold, vae, field = load_run(run_dir, device, "soft")
+    if rho_off:
+        field.composition_kind = "additive"
     rng = np.random.default_rng(config["eval"]["seed"])
     groups = condition_groups(data, stats, fold, config["split"]["method"])
     doubles, singles = groups["test doubles"], groups["test singles"]

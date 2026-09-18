@@ -357,6 +357,17 @@ DEFAULTS: dict[str, Any] = {
         # over operator_graph_ramp_epochs (similarity.penalty_ramp).
         "operator_graph_weight": 0.0,
         "operator_graph_ramp_epochs": 100,
+        # Composition-magnitude penalty (loop.rho_penalty): mean |rho|^2 over mean
+        # |z1 - z0|^2 - the share of the needed velocity rho carries - on every
+        # training combination's flow-matching batch. The
+        # combination data fix u_a + u_b + rho but not how it splits, so a drug seen
+        # only in combinations can carry an arbitrary u_a - measured: held-out
+        # Dasatinib alone pointed opposite to its true shift (cos -0.26, -0.31). A
+        # small weight picks, among equally good fits, the one that explains most by
+        # u_a + u_b. It must stay small: Panobinostat and Dacinostat combinations
+        # need rho (turning it off moved their training L2 0.8 -> 1.3-2.1).
+        # Pre-registered arms 2026-09-18: 0.01 and 0.1. 0 = off.
+        "rho_penalty_weight": 0.0,
         # 0 = fit the latent standardisation once before stage 2 and keep it.
         #
         # Do not turn this on without a reason. Refitting mid-training moves the

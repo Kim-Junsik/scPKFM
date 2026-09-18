@@ -41,6 +41,12 @@ STRICT_SPLIT=${STRICT_SPLIT:-true}        # exclude held-out conditions from the
                          # and the latent standardisation. Published pipelines do
                          # not do this, so it makes the problem strictly harder -
                          # state it as such rather than hiding it.
+                         # --lenient-hvg sets it to false: HVG over every cell, as
+                         # scDFM does. Stage 1 and the standardisation stay
+                         # leak-free either way. Adds _hvgall to cache and run names.
+RHO_PENALTY=${RHO_PENALTY:-0}   # weight of the composition-magnitude penalty,
+                         # |rho|^2 / |z1 - z0|^2 on training combinations (train.
+                         # rho_penalty_weight). 0 = off. Enters the run name.
 
 BATCH=${BATCH:-1024}
 LR=${LR:-1e-3}
@@ -327,6 +333,8 @@ usage() {
     --graph-mode MODE      penalty | mix              (default penalty)
     --graph-weight F       penalty weight             (default 0)
     --graph-threshold F    edge threshold             (default 0.25)
+    --rho-penalty F        composition-magnitude penalty weight (default 0)
+    --lenient-hvg          choose HVGs over every cell, as scDFM does
 
     --stage1 N             autoencoding epochs        (default 30)
     --stage2 N             flow-matching epochs       (default 200)
@@ -384,6 +392,8 @@ while [ $# -gt 0 ]; do
     --graph-mode)         GRAPH_MODE=$2; shift 2 ;;
     --graph-weight)       GRAPH_WEIGHT=$2; shift 2 ;;
     --graph-threshold)    GRAPH_THRESHOLD=$2; shift 2 ;;
+    --rho-penalty)        RHO_PENALTY=$2; shift 2 ;;
+    --lenient-hvg)        STRICT_SPLIT=false; shift ;;
     --stage1)             STAGE1=$2; shift 2 ;;
     --stage2)             STAGE2=$2; shift 2 ;;
     --warmup)             WARMUP=$2; shift 2 ;;
@@ -487,6 +497,12 @@ esac
 # They have to enter it at all because additive and combinations are different
 # problems on the same fold, and combosciplex is a different dataset entirely -
 # filing any of those under one name mixes results that cannot be compared.
+# A gene space chosen over every cell is a different cache and a different model,
+# so it must never share a name with the strict one. Without this tag,
+# STRICT_SPLIT=false silently reused (or overwrote) the strict cache.
+if [ "$STRICT_SPLIT" != "true" ]; then
+  SPLIT_TAG="${SPLIT_TAG}_hvgall"
+fi
 SUFFIX=""
 [ "$DATASET" = "norman" ] || SUFFIX="${SUFFIX}_${DATASET}"
 SUFFIX="${SUFFIX}${SPLIT_TAG}"
@@ -516,7 +532,9 @@ if [ -n "$OPERATOR_GRAPH" ]; then
   GRAPH_ARGS="$GRAPH_ARGS model.operator_graph_threshold=$GRAPH_THRESHOLD"
   GRAPH_ARGS="$GRAPH_ARGS train.operator_graph_weight=$GRAPH_WEIGHT"
 fi
-RUN=${TAG}${SUFFIX}_${GEN_TAG}${COUP_TAG}${GRAPH_TAG}_${COMPOSITION}_f${FOLD}
+RHO_TAG=""
+[ "$RHO_PENALTY" = "0" ] || RHO_TAG="_rho${RHO_PENALTY}"
+RUN=${TAG}${SUFFIX}_${GEN_TAG}${COUP_TAG}${GRAPH_TAG}${RHO_TAG}_${COMPOSITION}_f${FOLD}
 
 # The cache is NOT named that way: it must differ whenever the gene selection
 # differs, and STRICT_SPLIT excludes the held-out conditions from HVG selection,
@@ -570,6 +588,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
     split.fold=$FOLD \
     train.batch_size=$BATCH train.lr=$LR \
     train.coupling=$COUPLING train.uot_reg=$UOT_REG $GRAPH_ARGS \
+    train.rho_penalty_weight=$RHO_PENALTY \
     train.stage1_epochs=$STAGE1 train.stage2_epochs=$STAGE2 \
     train.single_warmup_epochs=$WARMUP train.device=$DEVICE \
     train.endpoint_weight=$ENDPOINT_WEIGHT train.mmd_weight=$MMD_WEIGHT \

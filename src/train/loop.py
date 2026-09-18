@@ -192,6 +192,27 @@ def composition_residual(field, z0: torch.Tensor, perturbations: list[int],
     return both - only_a - only_b + z0
 
 
+def rho_penalty(field, z: torch.Tensor, t: torch.Tensor, perturbations: list[int],
+                target: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """mean |rho|^2 / mean |z1 - z0|^2 at a combination's flow-matching points.
+
+    The share of the velocity the combination needs that rho carries. The
+    denominator is the flow-matching target (z1 - z0), fixed by the data: an
+    earlier version divided by |sum_a u_a|^2, which is ~0 right after the singles
+    warm-up for drugs seen only in combinations, and the term reached 9e5 in a
+    smoke run before any real run was made.
+
+    The generators' velocities enter rho detached, so the gradient only shrinks
+    rho's own output; how the fit is then shared out is left to flow matching,
+    which can move the effect into u_a + u_b only where the data allow it.
+    """
+    with torch.no_grad():
+        velocities = [field.generator(z, t, pert) for pert in perturbations]
+        scale = target.pow(2).sum(dim=1).mean()
+    correction = field.compose(velocities)
+    return correction.pow(2).sum(dim=1).mean() / (scale + eps)
+
+
 def training_rows(data: PerturbationData, conditions) -> np.ndarray:
     """Row indices of the cells a model is allowed to see.
 
@@ -314,6 +335,20 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
             f"over {train_cfg.get('operator_graph_ramp_epochs', 100)}")
         if graph_weight <= 0:
             log("  [warn] operator_graph_mode=penalty with weight 0: the graph does nothing")
+    # Composition-magnitude penalty. Only a learned composition has a rho, and an
+    # anchored field drops sum_a u_a for combinations, so there is nothing to
+    # compare rho against.
+    rho_weight = train_cfg.get("rho_penalty_weight", 0.0)
+    if rho_weight > 0:
+        if getattr(field, "composition_kind", "additive") != "learned":
+            log("  [warn] rho_penalty_weight > 0 but composition is additive: no rho, ignored")
+            rho_weight = 0.0
+        elif getattr(field, "anchored", False):
+            log("  [warn] rho_penalty_weight > 0 is ignored under an anchor")
+            rho_weight = 0.0
+        else:
+            log(f"  composition-magnitude penalty: weight {rho_weight}, on every "
+                f"training combination")
 
     # ONE encoding pass shared by both target sets. Doing it inside each of them
     # encodes every condition twice, which is minutes of gpu time before stage 2
@@ -373,6 +408,7 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         totals_end: list[float] = []
         totals_mmd: list[float] = []
         totals_graph: list[float] = []
+        totals_rho: list[float] = []
         graph_ramp = (penalty_ramp(epoch, train_cfg["single_warmup_epochs"],
                                    train_cfg.get("operator_graph_ramp_epochs", 100))
                       if graph_weight > 0 else 0.0)
@@ -406,6 +442,14 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
             predicted = field(z_t, t.reshape(-1), perturbations)
             matching = torch.nn.functional.mse_loss(predicted, z1p - z0p)
             loss = matching
+
+            # Prefer, among equally good fits of a combination, the one that
+            # explains most of it by u_a + u_b - see train.rho_penalty_weight.
+            if rho_weight > 0 and len(perturbations) >= 2:
+                rho_term = rho_penalty(field, z_t, t.reshape(-1), perturbations,
+                                       z1p - z0p)
+                loss = loss + rho_weight * rho_term
+                totals_rho.append(float(rho_term))
 
             # Distribution-level supervision, the term scDFM trains with and this
             # model did not have. Flow matching and the two population terms all
@@ -495,6 +539,7 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         extra += (f"  resid {np.mean(totals_resid):.5f}" if totals_resid else "")
         extra += (f"  graph {np.mean(totals_graph):.5f} (x{graph_ramp:.2f})"
                   if totals_graph else "")
+        extra += (f"  rho {np.mean(totals_rho):.5f}" if totals_rho else "")
         log(f"  stage2 epoch {epoch + 1:3d}/{train_cfg['stage2_epochs']}  "
             f"[{phase:7s}] loss {total / max(count, 1):.5f}  "
             f"fm {total_match / max(count, 1):.5f}{extra}")
