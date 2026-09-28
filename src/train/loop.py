@@ -125,6 +125,12 @@ def latent_endpoint_targets(vae, data: PerturbationData, sampler: ConditionSampl
                             means: dict | None = None) -> dict:
     """z_a for every TRAINING condition, and z_ctrl, computed once.
 
+    Returns `pseudo` alongside: the same kind of target for the singles training
+    does NOT contain, built from the sampler's pseudo_single_shifts. Kept in its own
+    dict because those are ridge estimates under additivity rather than measured
+    condition means, and because the conditions they name are absent from the data,
+    so no epoch ever samples them - see train.pseudo_single_weight.
+
     Where the composition term supervises the SECOND-order structure of the flow
     map, this supervises the first: after integrating from the control mean under
     condition a, the model should land on condition a's mean.
@@ -162,19 +168,28 @@ def latent_endpoint_targets(vae, data: PerturbationData, sampler: ConditionSampl
     # this the term would supervise a trajectory the model never takes and would
     # pull the field back into reproducing the additive part it no longer owns.
     starts = {}
+    control_cells = data.cells(data.control_condition)
+    base = control_cells[:min(n_cells, control_cells.shape[0])]
+
+    def _encoded_mean(shift) -> torch.Tensor:
+        with torch.no_grad():
+            z, _ = vae.encode_z(torch.as_tensor(
+                base + shift.astype(base.dtype, copy=False), device=device))
+        return z.mean(dim=0, keepdim=True)
+
     anchor = getattr(sampler, "anchor", None) or {}
-    if anchor:
-        shifted = [c for c in anchor if c in targets]
-        if shifted:
-            control_cells = data.cells(data.control_condition)
-            take = min(n_cells, control_cells.shape[0])
-            base = control_cells[:take]
-            for condition in shifted:
-                shift = anchor[condition].astype(base.dtype, copy=False)
-                with torch.no_grad():
-                    z, _ = vae.encode_z(torch.as_tensor(base + shift, device=device))
-                starts[condition] = z.mean(dim=0, keepdim=True)
-    return {"targets": targets, "control": control, "starts": starts}
+    for condition in [c for c in anchor if c in targets]:
+        starts[condition] = _encoded_mean(anchor[condition])
+
+    # Targets for the singles TRAINING DOES NOT HAVE - see
+    # train.pseudo_single_weight and baselines.pseudo_single_shifts. Kept separate
+    # from `targets` because they are estimates under additivity rather than
+    # measured condition means, and because the conditions they name do not exist
+    # in the data, so nothing in the epoch ever samples them.
+    pseudo = {condition: _encoded_mean(shift) for condition, shift
+              in (getattr(sampler, "pseudo_single_shifts", None) or {}).items()}
+    return {"targets": targets, "control": control, "starts": starts,
+            "pseudo": pseudo}
 
 
 def composition_residual(field, z0: torch.Tensor, perturbations: list[int],
@@ -324,6 +339,19 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
     resid_weight = train_cfg.get("resid_weight", 0.0)
     mmd_weight = train_cfg.get("mmd_weight", 0.0)
     endpoint_weight = train_cfg.get("endpoint_weight", 0.0)
+    pseudo_weight = train_cfg.get("pseudo_single_weight", 0.0)
+    if pseudo_weight > 0 and not getattr(sampler, "pseudo_single_shifts", None):
+        # scripts/train.py only fits the shifts when the weight is on, so an empty
+        # table here means the caller did not build them - silently training without
+        # the term would look like the term failing to help.
+        log("  [warn] pseudo_single_weight > 0 but the sampler carries no shifts; "
+            "the term is off (scripts/train.py fits them from the config)")
+        pseudo_weight = 0.0
+    if pseudo_weight > 0 and endpoint_weight <= 0:
+        log("  [warn] pseudo_single_weight > 0 with endpoint_weight 0: the pseudo "
+            "targets constrain Phi_a for unseen singles while the conditions that "
+            "ARE measured go unconstrained, which is the imbalance this term is "
+            "meant to remove")
     # Operator-graph penalty (model.operator_graph_mode=penalty). Mix mode needs no
     # loss term: the graph is inside the field.
     graph_weight = 0.0
@@ -354,7 +382,7 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
     # encodes every condition twice, which is minutes of gpu time before stage 2
     # takes its first step - and was an hour when the encode was also unchunked.
     means = None
-    if resid_weight > 0 or endpoint_weight > 0:
+    if resid_weight > 0 or endpoint_weight > 0 or pseudo_weight > 0:
         wanted = ([data.control_condition] + list(sampler.singles)
                   + list(sampler.doubles))
         started_targets = time.time()
@@ -382,12 +410,24 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
     # free to move the error into the other, which is how the current cancellation
     # arose in the first place.
     endpoint = None
-    if endpoint_weight > 0:
+    pseudo_names: list[str] = []
+    pseudo_index: list[int] = []
+    if endpoint_weight > 0 or pseudo_weight > 0:
         endpoint = latent_endpoint_targets(vae, data, sampler, device, means=means)
         moves = [float((v - endpoint["control"]).norm())
                  for v in endpoint["targets"].values()]
         log(f"  endpoint matching on: {len(moves)} training conditions, "
             f"target ||z_a - z_ctrl|| median {float(np.median(moves)):.4f}")
+    if pseudo_weight > 0 and endpoint["pseudo"]:
+        # Resolved once: the loop needs the perturbation INDEX, and these condition
+        # names are not in the data, so data.condition_perturbations cannot be asked.
+        pseudo_names = sorted(endpoint["pseudo"])
+        pseudo_index = [data.pert_index[data.naming.genes(c)[0]] for c in pseudo_names]
+        sizes = [float((endpoint["pseudo"][c] - endpoint["control"]).norm())
+                 for c in pseudo_names]
+        log(f"  pseudo-single endpoints on: {len(pseudo_names)} drugs with no "
+            f"training single, weight {pseudo_weight}, target "
+            f"||z_a - z_ctrl|| median {float(np.median(sizes)):.4f}")
 
     for epoch in range(train_cfg["stage2_epochs"]):
         if train_cfg["latent_renorm_every"] and epoch and                 epoch % train_cfg["latent_renorm_every"] == 0:
@@ -409,6 +449,7 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         totals_mmd: list[float] = []
         totals_graph: list[float] = []
         totals_rho: list[float] = []
+        totals_pseudo: list[float] = []
         graph_ramp = (penalty_ramp(epoch, train_cfg["single_warmup_epochs"],
                                    train_cfg.get("operator_graph_ramp_epochs", 100))
                       if graph_weight > 0 else 0.0)
@@ -489,6 +530,29 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
                 loss = loss + endpoint_weight * e_loss
                 totals_end.append(float(e_loss))
 
+            # The same term for the singles training does not contain. Those drugs
+            # appear only inside combinations, where rho can absorb any share of the
+            # displacement, so nothing pins their operator - and both drugs behind
+            # combosciplex's test singles are of that kind. The target is the ridge
+            # additive estimate of the drug's own effect; see
+            # train.pseudo_single_weight and baselines.pseudo_single_shifts.
+            #
+            # ONE drug per step rather than all of them. The estimator is unbiased
+            # over the epoch (every step draws uniformly) and the cost stays at one
+            # extra integration per step instead of len(pseudo_names); with 13 drugs
+            # and hundreds of steps per epoch each is visited many times.
+            #
+            # Always from the unshifted control: these conditions are singles, and
+            # `starts` only ever holds anchored combinations.
+            if pseudo_weight > 0 and pseudo_names:
+                pick = int(rng.integers(len(pseudo_names)))
+                z_end = integrate(field, endpoint["control"], [pseudo_index[pick]],
+                                  train_cfg["resid_steps"])
+                p_loss = torch.nn.functional.mse_loss(
+                    z_end, endpoint["pseudo"][pseudo_names[pick]])
+                loss = loss + pseudo_weight * p_loss
+                totals_pseudo.append(float(p_loss))
+
             # The composition residual. Only doubles have one, and only the ones
             # whose singles both exist in the data - see latent_residual_targets.
             #
@@ -540,6 +604,7 @@ def train_stage2(vae, field, data: PerturbationData, sampler: ConditionSampler,
         extra += (f"  graph {np.mean(totals_graph):.5f} (x{graph_ramp:.2f})"
                   if totals_graph else "")
         extra += (f"  rho {np.mean(totals_rho):.5f}" if totals_rho else "")
+        extra += (f"  pseudo {np.mean(totals_pseudo):.5f}" if totals_pseudo else "")
         log(f"  stage2 epoch {epoch + 1:3d}/{train_cfg['stage2_epochs']}  "
             f"[{phase:7s}] loss {total / max(count, 1):.5f}  "
             f"fm {total_match / max(count, 1):.5f}{extra}")

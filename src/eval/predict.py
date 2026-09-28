@@ -45,7 +45,8 @@ def autoencode(vae, cells: np.ndarray, device: str) -> np.ndarray:
 @torch.no_grad()
 def predict_cells(vae, field, control_cells: np.ndarray, condition: str,
                   pert_index: dict[str, int], n_steps: int,
-                  device: str, naming, anchor: dict | None = None) -> np.ndarray:
+                  device: str, naming, anchor: dict | None = None,
+                  alpha: tuple[str, float] | None = None) -> np.ndarray:
     """`naming` parses the condition; `anchor` is eval.baselines.anchor_deltas.
 
     naming is positional and has no default on purpose. It used to fall back to
@@ -66,19 +67,114 @@ def predict_cells(vae, field, control_cells: np.ndarray, condition: str,
     threaded through their own signatures: forgetting to pass it at one of those
     call sites would silently score an anchored model as if it were unanchored,
     and the number would look like a training failure rather than a plumbing bug.
+
+    `alpha` is the global magnitude correction, (mode, value) - see apply_alpha. It
+    rides the same choke point and the same `field.<attr>` fallback for the same
+    reason, so every scoring path gets it or none does. Pass ("none", 1.0) to force
+    raw predictions, which is what fit_alpha needs.
     """
     vae.eval()
     field.eval()
     if anchor is None:
         anchor = getattr(field, "anchor_table", None)
     perturbations = [pert_index[g] for g in condition_genes(condition, naming)]
+    source = control_cells
     shift = (anchor or {}).get(condition)
     if shift is not None:
         control_cells = control_cells + shift.astype(control_cells.dtype, copy=False)
     x0 = torch.as_tensor(control_cells, device=device)
     z0, _ = vae.encode_z(x0)
     z1 = integrate(field, z0, perturbations, n_steps)
-    return vae.reconstruction(vae.decode_z(z1), **_head_aux(vae, x0)).cpu().numpy()
+    predicted = vae.reconstruction(vae.decode_z(z1),
+                                  **_head_aux(vae, x0)).cpu().numpy()
+    if alpha is None:
+        alpha = getattr(field, "magnitude_alpha", None)
+    # `source` and not `control_cells`: the displacement alpha corrects is measured
+    # from the control population, and under an anchor control_cells has already
+    # been shifted by w_A + w_B, which is part of the displacement, not its origin.
+    return apply_alpha(predicted, source, alpha)
+
+
+def apply_alpha(predicted: np.ndarray, control_cells: np.ndarray,
+                alpha: tuple[str, float] | None) -> np.ndarray:
+    """Scale the predicted displacement by a global factor. `alpha` is (mode, value).
+
+    The model's displacement is systematically SHORT - ratio 0.646 on training
+    singles, the conditions flow matching supervises most directly - and one scalar
+    fitted on training conditions moved 5-fold Norman L2 2.2482 -> 2.1418 with DS
+    0.7750 -> 0.8956. A per-condition oracle alpha only reaches 1.94 from 2.25, so
+    this is close to all a magnitude correction can buy; the rest is direction.
+
+    The two modes differ by exactly (alpha - 1) times the CENTRED displacement:
+
+        mean_i = p_i + (alpha - 1) * mean(p - c)      one shift for every cell
+        cell_i = p_i + (alpha - 1) * (p_i - c_i)      each cell's own
+
+    Both give the same population mean, so L2 cannot tell them apart. mean leaves
+    the predicted population's shape exactly as the decoder produced it; cell also
+    scales how much the displacement VARIES between cells, which is the smaller part
+    of the spread here - a transported population inherits the control population's
+    heterogeneity, and both modes carry that through untouched. Expect the two to
+    score close on edist_rel and DS rather than far apart; both are post-hoc, so one
+    checkpoint scores both and the comparison is free.
+
+    Clamped at zero: these are log1p values and cannot be negative, the same reason
+    HurdleHead.point_estimate clamps its sampled magnitude.
+    """
+    if alpha is None:
+        return predicted
+    mode, value = alpha
+    if mode == "none" or value == 1.0:
+        return predicted
+    if mode == "mean":
+        delta = predicted.mean(axis=0) - control_cells.mean(axis=0)
+        corrected = predicted + (value - 1.0) * delta
+    elif mode == "cell":
+        corrected = control_cells + value * (predicted - control_cells)
+    else:
+        raise ValueError(f"unknown eval.magnitude_alpha {mode!r}")
+    return np.clip(corrected, 0.0, None)
+
+
+@torch.no_grad()
+def fit_alpha(vae, field, data, stats, train_conditions: list[str], config,
+              rng: np.random.Generator, anchor: dict | None = None) -> float:
+    """The least-squares global scale, fitted on TRAINING conditions only.
+
+        alpha = sum_c <d_hat_c, d_c> / sum_c ||d_hat_c||^2
+
+    which is the scalar minimising sum_c ||alpha * d_hat_c - d_c||^2 - the same
+    quantity L2 is computed from, so the fit targets the metric rather than a proxy.
+    Reading a held-out condition here would make the correction illegitimate, so the
+    loop takes `train_conditions` and nothing else; the measured alpha_train
+    (1.16-1.38) came out close to the test-optimal alpha, which is why one scalar
+    fitted this way transfers.
+
+    Run with eval.magnitude_alpha unset, i.e. on the RAW predictions: fitting on
+    already-corrected ones would compound the factor.
+    """
+    device = config["train"]["device"]
+    n_gen = config["eval"]["n_gen_cells"]
+    n_steps = config["train"]["n_integration_steps"]
+    control_cells = data.cells(data.control_condition)
+
+    numerator, denominator = 0.0, 0.0
+    for condition in train_conditions:
+        if data.naming.is_control(condition) or not stats.has(condition):
+            continue
+        pick = rng.choice(control_cells.shape[0],
+                          size=min(n_gen, control_cells.shape[0]), replace=False)
+        control_sample = control_cells[pick]
+        predicted = predict_cells(vae, field, control_sample, condition,
+                                  data.pert_index, n_steps, device, data.naming,
+                                  anchor, alpha=("none", 1.0))
+        d_hat = predicted.mean(axis=0) - control_sample.mean(axis=0)
+        d = stats.delta(condition)
+        numerator += float(d_hat @ d)
+        denominator += float(d_hat @ d_hat)
+    if denominator <= 0.0:
+        return 1.0
+    return numerator / denominator
 
 
 def evaluate_model(vae, field, data, stats, folds, method, config,

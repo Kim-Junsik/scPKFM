@@ -260,6 +260,36 @@ def main() -> None:
         field = PKFMField(config, data.n_perturbations, vae.latent_dim,
                           data.perturbations).to(device)
         field.load_state_dict(checkpoint["field"])
+        # The anchor table and the magnitude correction are not in the checkpoint -
+        # both are functions of the training conditions and the condition means, and
+        # predict_cells reads them off the field. This script builds its own field
+        # rather than going through diagnostics.load_run, so without this it would
+        # score an anchored or alpha-corrected run as if it were neither, and five
+        # of the paper's columns would silently disagree with the others.
+        from src.eval import baselines as _baselines
+        from src.eval import predict as _predict
+        # Built from the cells already loaded here rather than through
+        # diagnostics._dataset, which would open the cache a second time - 2.2 GB
+        # on Norman for a table of means.
+        _labels = np.empty(data.x.shape[0], dtype=object)
+        for _condition, _rows in data.rows.items():
+            _labels[_rows] = _condition
+        _stats = _baselines.ConditionMeans(data.x, _labels, data.naming)
+        _train_conditions = _baselines.training_conditions(_stats, fold, method)
+        field.anchor_table = _baselines.anchor_deltas(
+            config["model"].get("anchor", "none"), _stats, _train_conditions,
+            list(_stats.mean), alpha=config["eval"]["ridge_alpha"])
+        vae.eval()
+        field.eval()
+        _alpha_mode = config["eval"].get("magnitude_alpha", "none")
+        field.magnitude_alpha = None
+        if _alpha_mode != "none":
+            field.magnitude_alpha = (_alpha_mode, _predict.fit_alpha(
+                vae, field, data, _stats, _train_conditions, config,
+                np.random.default_rng(config["eval"]["seed"]),
+                anchor=field.anchor_table))
+            print(f"magnitude alpha ({_alpha_mode}): "
+                  f"{field.magnitude_alpha[1]:.4f}")
 
         genes = None
         if args.infer_top_gene:

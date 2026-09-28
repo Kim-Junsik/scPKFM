@@ -45,6 +45,22 @@ Lie bracket at second; this truncates nowhere and learns the remainder.
 
 It is untested. Three structured terms have now been added to this model and none
 improved it, so treat it as a hypothesis with a switch, not as the default.
+
+AND WHAT IS NOW KNOWN TO BE WRONG WITH IT
+
+rho carries more than a composition law. The data fix u_A + u_B + rho and not how
+it splits, so rho can take any share of the additive displacement - and for a drug
+that appears only inside combinations there is nothing else to pin its operator
+down. On combosciplex that is 13 of 17 drugs, every test combination is
+Panobinostat + X with X seen in exactly one training condition, and both test
+singles are drugs of that kind. Measured (scripts/rho_off_probe.py): held-out
+Dasatinib alone pointed OPPOSITE its true shift, cosine -0.26 and -0.31, and rho
+hurt two of three held-out combinations while helping one.
+
+model.composition_orthogonal projects rho off span{u_a}, which leaves it free to
+add directions the generators do not produce and unable to rescale the ones they
+do - see _orthogonalise. train.pseudo_single_weight attacks the same gap from the
+data side.
 """
 
 from __future__ import annotations
@@ -104,6 +120,48 @@ class ValueComposition(nn.Module):
         return self.rho(pooled)
 
 
+def _orthogonalise(correction: torch.Tensor,
+                   velocities: list[torch.Tensor]) -> torch.Tensor:
+    """Remove from `correction` every component lying in span{u_a}, per row.
+
+    WHY. model.composition=learned fits a combination as u_A + u_B + rho, and the
+    data fixes only the SUM. rho is free to take any share of it, so a drug seen
+    only inside combinations has an operator the data never pins down. On
+    combosciplex that is not a corner case: 13 of 17 drugs never appear alone in
+    training, every test combination is Panobinostat + X with X seen in exactly one
+    training condition, and both test singles are drugs of that kind. Measured with
+    scripts/rho_off_probe.py: held-out Dasatinib alone pointed OPPOSITE its true
+    shift (cosine -0.26, -0.31), and rho hurt two of three held-out combinations
+    (+0.40, +0.31) while helping one (-0.12).
+
+    Projecting rho onto the complement of span{u_a} leaves it able to ADD
+    directions the generators do not produce, and unable to RESCALE the ones they
+    do. The component of the target displacement inside that span therefore has to
+    come from the operators, and since a well-sampled partner (Givinostat: one
+    single, nine combinations) pins its own, what remains in the plane identifies
+    the data-poor one.
+
+    Distinct from train.rho_penalty_weight, which bounds |rho| but not its
+    direction - that is the weaker version of this.
+
+    Gram-Schmidt rather than a one-shot projection because the u_a are not
+    orthogonal. A basis vector whose norm collapses (two generators producing
+    nearly the same velocity at this z) is dropped rather than normalised, which
+    would amplify numerical noise into a projection direction.
+    """
+    basis: list[torch.Tensor] = []
+    for velocity in velocities:
+        residual = velocity
+        for vector in basis:
+            residual = residual - (residual * vector).sum(-1, keepdim=True) * vector
+        norm = residual.norm(dim=-1, keepdim=True)
+        basis.append(torch.where(norm > 1e-6, residual / norm.clamp(min=1e-8),
+                                 torch.zeros_like(residual)))
+    for vector in basis:
+        correction = correction - (correction * vector).sum(-1, keepdim=True) * vector
+    return correction
+
+
 class PKFMField(nn.Module):
     """scPKFM's composed field: the sum of per-perturbation generators.
 
@@ -138,6 +196,8 @@ class PKFMField(nn.Module):
         # the field must NOT reproduce it - see model.anchor in config.py.
         self.anchored = model_cfg.get("anchor", "none") != "none"
         self.composition_kind = model_cfg.get("composition", "additive")
+        # Project rho onto the complement of span{u_a}; see _orthogonalise.
+        self.compose_orthogonal = bool(model_cfg.get("composition_orthogonal", False))
         if self.composition_kind == "learned":
             self.compose = ValueComposition(self.latent_dim,
                                             model_cfg.get("composition_hidden", 128))
@@ -171,7 +231,10 @@ class PKFMField(nn.Module):
         # to a single would break v(z,t,{a}) = u_a, which the loss supervises
         # directly and the tests assert.
         if self.composition_kind == "learned" and len(perturbations) >= 2:
-            velocity = velocity + self.compose(per_perturbation)
+            correction = self.compose(per_perturbation)
+            if self.compose_orthogonal:
+                correction = _orthogonalise(correction, per_perturbation)
+            velocity = velocity + correction
         return velocity
 
 

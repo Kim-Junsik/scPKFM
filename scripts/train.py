@@ -21,7 +21,7 @@ from src import config as config_module
 from src.data import splits
 from src.data.conventions import ConditionNaming
 from src.data.dataset import ConditionSampler, PerturbationData
-from src.eval import baselines
+from src.eval import baselines, predict
 from src.eval.predict import evaluate_model
 from src.models.flow import PKFMField
 from src.models.backbones import build_backbone
@@ -79,6 +79,20 @@ def main() -> None:
                                      alpha=config["eval"]["ridge_alpha"])
     sampler = ConditionSampler(data, train_conditions, config["train"]["batch_size"],
                                rng, anchor=anchor)
+    # Ridge estimates of the singles training does not contain, for
+    # train.pseudo_single_weight. Carried on the sampler for the same reason the
+    # anchor is: stage 2 reads both off it rather than taking more arguments.
+    if config["train"].get("pseudo_single_weight", 0.0) > 0:
+        sampler.pseudo_single_shifts = baselines.pseudo_single_shifts(
+            stats, train_conditions, alpha=config["eval"]["ridge_alpha"])
+        named = sorted(naming.genes(c)[0] for c in sampler.pseudo_single_shifts)
+        log(f"pseudo singles: {len(named)} drugs have no training single and will "
+            f"be supervised against their ridge effect vector"
+            + (f" ({', '.join(named[:6])}{', ...' if len(named) > 6 else ''})"
+               if named else ""))
+        if not named:
+            log("  [warn] train.pseudo_single_weight > 0 but every drug already has "
+                "a training single; the term will do nothing")
     if anchor_kind != "none":
         # A combination with no shift would train unanchored while the field is in
         # anchored mode - correction only, no additive part - so it would be asked
@@ -191,6 +205,21 @@ def main() -> None:
 
     log("\n=== evaluation (same protocol as the baselines) ===")
     field.anchor_table = anchor
+    # Post-hoc magnitude correction, fitted on TRAINING conditions. Attached to the
+    # field so every scoring path picks it up through predict_cells' fallback, the
+    # same route the anchor table takes; recorded in results.json so a run's numbers
+    # can be read back as corrected or not.
+    alpha_mode = config["eval"].get("magnitude_alpha", "none")
+    alpha = None
+    if alpha_mode != "none":
+        value = predict.fit_alpha(vae, field, data, stats, train_conditions, config,
+                                  np.random.default_rng(config["eval"]["seed"]),
+                                  anchor=anchor)
+        alpha = (alpha_mode, value)
+        log(f"  magnitude alpha ({alpha_mode}) fitted on "
+            f"{len(train_conditions)} training conditions: {value:.4f}")
+    field.magnitude_alpha = alpha
+
     results = evaluate_model(vae, field, data, stats, [fold], method, config, rng,
                              anchor=anchor)
     for key, value in results.items():
@@ -199,7 +228,8 @@ def main() -> None:
     torch.save({"vae": vae.state_dict(), "field": field.state_dict(), "config": config},
                os.path.join(run_dir, "checkpoint.pt"))
     with open(os.path.join(run_dir, "results.json"), "w") as out:
-        json.dump({"config": config, "results": results}, out, indent=2)
+        json.dump({"config": config, "results": results,
+                   "magnitude_alpha": list(alpha) if alpha else None}, out, indent=2)
     log(f"-> {run_dir}")
     handle.close()
 

@@ -104,6 +104,27 @@ DEFAULTS: dict[str, Any] = {
         # the training doubles before quoting a final target line.
         "ridge_alpha": 1.0,
         "ridge_weight_by_cells": False,
+        # Global magnitude correction applied AFTER decoding (predict.fit_alpha).
+        # The model's predicted displacement is systematically too short - measured
+        # ratio 0.646 on training singles, the conditions the loss supervises most
+        # directly - and one scalar fitted on TRAINING conditions moved 5-fold
+        # Norman L2 2.2482 -> 2.1418 and DS 0.7750 -> 0.8956. The fitted
+        # alpha_train (1.16-1.38) was close to the test-optimal alpha, and a
+        # per-condition oracle alpha only reaches 1.94, so this is most of what a
+        # magnitude correction can buy; what remains is direction.
+        #
+        #   none  no correction
+        #   mean  one shift for every cell, (alpha-1) * mean displacement. The
+        #         predicted population's shape is exactly the decoder's.
+        #   cell  each cell's own displacement is scaled.
+        # They differ by (alpha-1) * the CENTRED displacement, so both give the same
+        # population mean and L2 cannot separate them; cell additionally scales how
+        # much the displacement varies between cells, which is the smaller part of
+        # the spread when a transported population already carries the control
+        # population's heterogeneity. Post-hoc and training-free: one checkpoint
+        # scores every setting, so this is measured rather than chosen.
+        "magnitude_alpha": "none",  # none | mean | cell
+
         "device": "cuda",
         "seed": 0,
     },
@@ -122,6 +143,26 @@ DEFAULTS: dict[str, Any] = {
         # hurdle only: 41 % of entries are exactly zero, and a plain MSE head
         # fixes a constant sigma, which collapses cell-to-cell variance.
         "decoder_head": "hurdle",
+        # Rank of the gene-wise output readout (pcab.GeneWiseHurdleHead). 1 is the
+        # measured configuration: ONE shared direction in the d_value feature space
+        # for all G genes, plus a per-gene bias. Every gene therefore shares the same
+        # feature -> expression rule, and the map cannot mix genes - so it cannot
+        # express a rotation, only a per-gene gain.
+        #
+        # That is what the direction diagnosis points at. A per-gene diagonal
+        # correction moves L2 by 0.05-0.16 and leaves cosine unchanged, i.e. the
+        # decoder's distortion is genes MIXING, not genes scaled wrongly. And the
+        # residual sits where a rank-1 readout would leave it: the ~950 genes
+        # outside the top-50 energy block score cosine 0.65 in every run measured,
+        # against 0.90-0.94 inside it, and 0.65 holds AT THE DECODER CEILING (true
+        # latents in), so it is not a transport error.
+        #
+        # rank > 1 gives R shared directions and per-gene mixing coefficients:
+        # R*d_value + G*R parameters, 81 K at R=16, G=5000, d_value=64, against the
+        # 5.2 M encoder. Initialised so coefficient 0 is one and the rest zero,
+        # making rank=1 the exact starting point of any larger rank. Changing this
+        # changes stage 1, so a run cannot reuse an encoder trained at another rank.
+        "head_rank": 1,
         "hurdle_bce_weight": 1.0,
         # How the binary detection event is realised at inference.
         # sample is the right default for a distribution-level metric; soft is
@@ -161,6 +202,15 @@ DEFAULTS: dict[str, Any] = {
         #           Starts exactly additive (rho's output layer is zero).
         "composition": "additive",  # additive | learned
         "composition_hidden": 128,
+        # Project rho onto the complement of span{u_a} (flow._orthogonalise), so it
+        # can ADD directions the generators do not produce but never RESCALE the
+        # ones they do. The combination data fix u_A + u_B + rho and not how it
+        # splits, which leaves the operator of a drug seen only in combinations
+        # unidentified - 13 of combosciplex's 17 drugs, including both drugs behind
+        # the two test singles that carry 76 % of the gap to the Table 3 target.
+        # A no-op at initialisation (rho starts at zero), and it only ever removes
+        # capacity from rho, so it needs no separate warm-up.
+        "composition_orthogonal": False,
         # Where the flow STARTS for a combination. none transports a control cell
         # and the field must produce the whole displacement, 88 % of which is the
         # additive part. The other two shift the control cell in GENE SPACE first,
@@ -336,6 +386,27 @@ DEFAULTS: dict[str, Any] = {
         # Scale: this loss starts around ||z_a - z_ctrl||^2 / latent_dim, the same
         # order as the flow-matching term, so a weight near 1 already competes.
         "endpoint_weight": 0.0,
+        # Endpoint matching for the singles that DO NOT EXIST in training.
+        #
+        # endpoint_weight above supervises Phi_a(z_ctrl) -> z_a for every training
+        # condition. A drug with no training single gets no such term, and the only
+        # data touching it is a combination, where rho can absorb any share of the
+        # displacement - so its operator is unidentified. 13 of combosciplex's 17
+        # drugs are in that position, including both drugs behind the two test
+        # singles, which carry 76 % of the gap to the Table 3 target.
+        #
+        # The target is the ridge additive fit's effect vector w_a, pooled over
+        # every TRAINING condition the drug appears in (baselines.fit_ridge_additive,
+        # the same fit behind model.anchor=ridge), encoded through the frozen VAE.
+        # It is an estimate under additivity, not ground truth, so it is weighted
+        # BELOW endpoint_weight: it should identify the operator and then yield to
+        # flow matching, not pin it. On combosciplex that estimate scores
+        # resid_R2 0.192 / edist_rel 0.440 on validation conditions including the
+        # held-out singles, which is the quality being borrowed.
+        #
+        # Requires split.method/data such that every drug appears in some training
+        # condition (true for both datasets here). 0 = off.
+        "pseudo_single_weight": 0.0,
         # Integration steps for that term only. The residual is a population-mean
         # quantity, so one point is integrated rather than the batch, and step
         # count was measured not to matter (resid_R2 -0.9577 at 20 steps vs

@@ -48,6 +48,29 @@ RHO_PENALTY=${RHO_PENALTY:-0}   # weight of the composition-magnitude penalty,
                          # |rho|^2 / |z1 - z0|^2 on training combinations (train.
                          # rho_penalty_weight). 0 = off. Enters the run name.
 
+# --- identifiability of a drug seen only inside combinations -----------------
+# 13 of combosciplex's 17 drugs never appear alone in training, and both drugs
+# behind its two test singles are of that kind - the block carrying 76 % of the
+# gap to the Table 3 target. The combination data fix u_A + u_B + rho and not how
+# it splits, so those operators are unidentified. These two constrain the split.
+RHO_ORTHOGONAL=${RHO_ORTHOGONAL:-false}  # project rho off span{u_a}
+                         # (model.composition_orthogonal). Needs COMPOSITION=learned.
+                         # A no-op at init, so it needs no warm-up. Run name: _perp.
+PSEUDO_SINGLE=${PSEUDO_SINGLE:-0}        # weight of the endpoint term for the
+                         # singles training does not contain, against their ridge
+                         # effect vector (train.pseudo_single_weight). Keep it BELOW
+                         # ENDPOINT_WEIGHT: the target is an estimate under
+                         # additivity, not a measured mean. Run name: _ps<w>.
+
+# Post-hoc global magnitude correction, fitted on TRAINING conditions
+# (eval.magnitude_alpha). none | mean | cell. Costs no training: the predicted
+# displacement is short (ratio 0.646 on training singles) and one scalar moved
+# 5-fold Norman L2 2.2482 -> 2.1418 with DS 0.7750 -> 0.8956. The two modes differ
+# by (alpha-1) * the centred displacement, so they share a population mean and only
+# `cell` touches how much the displacement varies between cells. NOT in the run
+# name: one checkpoint scores every setting.
+MAGNITUDE_ALPHA=${MAGNITUDE_ALPHA:-none}
+
 BATCH=${BATCH:-1024}
 LR=${LR:-1e-3}
 STAGE1=30                # autoencoding epochs
@@ -234,6 +257,17 @@ GENERATOR=${GENERATOR:-affine}         # affine | neural_field | shared_basis
                          # Never compared on fold 1 or under the population losses,
                          # which is the point of keeping the switch.
 
+# Rank of the gene-wise output readout (model.head_rank). 1 is the measured
+# setting: ONE shared direction in the d_v feature space for all G genes, so the
+# readout can rescale a gene but never mix two - it cannot express a rotation. The
+# direction diagnosis says that is the binding constraint: a per-gene diagonal
+# correction moves L2 and leaves cosine alone, and the ~950 genes outside the
+# top-50 energy block sit at cosine 0.65 even AT THE DECODER CEILING. rank 16 is
+# 81 K parameters against a 5.2 M encoder and starts exactly as rank 1.
+# CHANGES STAGE 1, so a run cannot reuse an encoder trained at another rank.
+# Enters the run name.
+HEAD_RANK=${HEAD_RANK:-1}
+
 LATENT_READOUT=${LATENT_READOUT:-dense}     # dense | pathway
                          # dense   z = Linear(K*d_v -> 64). The measured setting;
                          #         the projection mixes every token, so no latent
@@ -334,6 +368,10 @@ usage() {
     --graph-weight F       penalty weight             (default 0)
     --graph-threshold F    edge threshold             (default 0.25)
     --rho-penalty F        composition-magnitude penalty weight (default 0)
+    --rho-orthogonal       project rho off span{u_a}  (needs --composition learned)
+    --pseudo-single F      endpoint weight for the singles training lacks (default 0)
+    --magnitude-alpha MODE none | mean | cell, post-hoc scale (default none)
+    --head-rank N          gene-wise readout rank    (default 1, changes stage 1)
     --lenient-hvg          choose HVGs over every cell, as scDFM does
 
     --stage1 N             autoencoding epochs        (default 30)
@@ -380,6 +418,7 @@ while [ $# -gt 0 ]; do
     --generator)          GENERATOR=$2; shift 2 ;;
     --composition)        COMPOSITION=$2; shift 2 ;;
     --latent-readout)     LATENT_READOUT=$2; shift 2 ;;
+    --head-rank)          HEAD_RANK=$2; shift 2 ;;
     --generator-rank)     GENERATOR_RANK=$2; shift 2 ;;
     --shared-rank)        SHARED_RANK=$2; shift 2 ;;
     --private-rank)       PRIVATE_RANK=$2; shift 2 ;;
@@ -393,6 +432,9 @@ while [ $# -gt 0 ]; do
     --graph-weight)       GRAPH_WEIGHT=$2; shift 2 ;;
     --graph-threshold)    GRAPH_THRESHOLD=$2; shift 2 ;;
     --rho-penalty)        RHO_PENALTY=$2; shift 2 ;;
+    --rho-orthogonal)     RHO_ORTHOGONAL=true; shift ;;
+    --pseudo-single)      PSEUDO_SINGLE=$2; shift 2 ;;
+    --magnitude-alpha)    MAGNITUDE_ALPHA=$2; shift 2 ;;
     --lenient-hvg)        STRICT_SPLIT=false; shift ;;
     --stage1)             STAGE1=$2; shift 2 ;;
     --stage2)             STAGE2=$2; shift 2 ;;
@@ -534,6 +576,26 @@ if [ -n "$OPERATOR_GRAPH" ]; then
 fi
 RHO_TAG=""
 [ "$RHO_PENALTY" = "0" ] || RHO_TAG="_rho${RHO_PENALTY}"
+# Both of these change what the model IS, so both enter the run name - a run that
+# shared a name with its own control would overwrite the comparison.
+if [ "$RHO_ORTHOGONAL" = "true" ]; then
+  if [ "$COMPOSITION" != "learned" ]; then
+    echo "--rho-orthogonal needs --composition learned: composition=additive has" >&2
+    echo "no rho to project, so the flag would silently do nothing." >&2
+    exit 1
+  fi
+  RHO_TAG="${RHO_TAG}_perp"
+fi
+[ "$PSEUDO_SINGLE" = "0" ] || RHO_TAG="${RHO_TAG}_ps${PSEUDO_SINGLE}"
+# A different readout rank is a different encoder, so it can never share a run
+# name (or an --init-vae-from source) with another rank.
+[ "$HEAD_RANK" = "1" ] || RHO_TAG="${RHO_TAG}_hr${HEAD_RANK}"
+# NOT in the run name: it is post-hoc and fitted from the run's own predictions, so
+# the same checkpoint can be scored at any setting without retraining.
+case "$MAGNITUDE_ALPHA" in
+  none|mean|cell) ;;
+  *) echo "unknown --magnitude-alpha $MAGNITUDE_ALPHA (none | mean | cell)" >&2; exit 1 ;;
+esac
 RUN=${TAG}${SUFFIX}_${GEN_TAG}${COUP_TAG}${GRAPH_TAG}${RHO_TAG}_${COMPOSITION}_f${FOLD}
 
 # The cache is NOT named that way: it must differ whenever the gene selection
@@ -552,7 +614,7 @@ echo "  endpoint=$ENDPOINT_WEIGHT resid=$RESID_WEIGHT steps=$RESID_STEPS"
 echo "  mmd=$MMD_WEIGHT"
 echo "  generator=$GENERATOR composition=$COMPOSITION"
 echo "  init_vae_from=${INIT_VAE_FROM:-(none - stage 1 will train)}"
-echo "  readout=$LATENT_READOUT rank=$GENERATOR_RANK shared_rank=$SHARED_RANK private_rank=$PRIVATE_RANK"
+echo "  readout=$LATENT_READOUT head_rank=$HEAD_RANK rank=$GENERATOR_RANK shared_rank=$SHARED_RANK private_rank=$PRIVATE_RANK"
 echo "  validation=$VALIDATION val_fold=${VAL_FOLD:-legacy} val_singles=$VAL_SINGLES coupling=$COUPLING uot_reg=$UOT_REG"
 echo "  operator_graph=${OPERATOR_GRAPH:-none} mode=$GRAPH_MODE weight=$GRAPH_WEIGHT threshold=$GRAPH_THRESHOLD"
 echo "  strict_split=$STRICT_SPLIT n_gen=$N_GEN device=$DEVICE"
@@ -589,6 +651,9 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
     train.batch_size=$BATCH train.lr=$LR \
     train.coupling=$COUPLING train.uot_reg=$UOT_REG $GRAPH_ARGS \
     train.rho_penalty_weight=$RHO_PENALTY \
+    train.pseudo_single_weight=$PSEUDO_SINGLE \
+    model.composition_orthogonal=$RHO_ORTHOGONAL \
+    eval.magnitude_alpha=$MAGNITUDE_ALPHA \
     train.stage1_epochs=$STAGE1 train.stage2_epochs=$STAGE2 \
     train.single_warmup_epochs=$WARMUP train.device=$DEVICE \
     train.endpoint_weight=$ENDPOINT_WEIGHT train.mmd_weight=$MMD_WEIGHT \
@@ -598,6 +663,7 @@ if [ "$EVAL_ONLY" -eq 0 ]; then
     model.generator=$GENERATOR model.composition=$COMPOSITION \
     ${INIT_VAE_FROM:+train.init_vae_from=$INIT_VAE_FROM} \
     model.latent_readout=$LATENT_READOUT model.generator_rank=$GENERATOR_RANK \
+    model.head_rank=$HEAD_RANK \
     model.shared_rank=$SHARED_RANK model.private_rank=$PRIVATE_RANK \
     model.anchor=$ANCHOR train.seed=$SEED \
     ${MASK_L1:+model.mask_l1=$MASK_L1} \

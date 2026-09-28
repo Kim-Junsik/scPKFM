@@ -26,7 +26,7 @@ from ..data.dataset import PerturbationData
 from ..data import splits
 from ..models.backbones import build_backbone
 from ..models.flow import PKFMField, integrate
-from . import baselines
+from . import baselines, predict
 from .baselines import ConditionMeans, training_conditions
 from .predict import _head_aux
 
@@ -114,12 +114,23 @@ def load_run(run_dir: str, device: str = "cpu", gate: str | None = None,
     # training conditions and the condition means, both of which this function has
     # just reconstructed, and a stale table shipped alongside stale weights is the
     # kind of mismatch that reads as a bad result instead of a bad load.
+    train_conditions = training_conditions(stats, fold, method)
     field.anchor_table = baselines.anchor_deltas(
-        config["model"].get("anchor", "none"), stats,
-        training_conditions(stats, fold, method),
+        config["model"].get("anchor", "none"), stats, train_conditions,
         list(stats.mean), alpha=config["eval"]["ridge_alpha"])
     vae.eval()
     field.eval()
+    # The magnitude correction rides the same fallback as the anchor table, and is
+    # refitted here for the same reason it is rebuilt there: it is a function of the
+    # training conditions and this run's own predictions. Refitting costs one pass
+    # over the training conditions, which is why it is skipped unless asked for.
+    alpha_mode = config["eval"].get("magnitude_alpha", "none")
+    field.magnitude_alpha = None
+    if alpha_mode != "none":
+        field.magnitude_alpha = (alpha_mode, predict.fit_alpha(
+            vae, field, data, stats, train_conditions, config,
+            np.random.default_rng(config["eval"]["seed"]),
+            anchor=field.anchor_table))
     return config, data, stats, fold, vae, field
 
 

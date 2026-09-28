@@ -128,6 +128,42 @@ def fit_ridge_additive(stats: ConditionMeans, train_conditions: list[str],
     return {"w": coefficients, "index": index, "covered": covered}
 
 
+def pseudo_single_shifts(stats: ConditionMeans, train_conditions: list[str],
+                         alpha: float = 1.0) -> dict[str, np.ndarray]:
+    """condition -> gene-space shift, for the singles that TRAINING DOES NOT HAVE.
+
+    A drug whose only training conditions are combinations has an unidentified
+    operator: the data fix u_A + u_B + rho and not how it splits, so u_a can be
+    anything. On combosciplex that is 13 of 17 drugs, and it includes both drugs
+    behind the two test singles - the block carrying 76 % of the gap to the Table 3
+    target. Measured with scripts/rho_off_probe.py: held-out Dasatinib alone
+    pointed OPPOSITE its true shift (cosine -0.26, -0.31).
+
+    The ridge additive fit pools a drug's effect over every training condition it
+    appears in, so w_a exists for every covered drug whether or not it was ever
+    given alone. loop.latent_endpoint_targets encodes these shifts into latent
+    targets for Phi_a(z_ctrl), which is the term those drugs otherwise never get.
+
+    READS TRAINING CONDITIONS ONLY, the same rows anchor_deltas(kind="ridge") reads.
+    Returns only drugs with NO training single: one that has a single is already
+    supervised directly, and a weaker estimate must not compete with that.
+
+    The canonical spelling is used for the key; ConditionSampler and the endpoint
+    loss both look conditions up by name, and these names are not in the data.
+    """
+    naming = stats.naming
+    perturbations = sorted({g for c in train_conditions if not naming.is_control(c)
+                            for g in condition_genes(c, naming)})
+    if not perturbations:
+        return {}
+    trained_alone = {condition_genes(c, naming)[0] for c in train_conditions
+                     if naming.is_single(c) and stats.has(c)}
+    fit = fit_ridge_additive(stats, train_conditions, perturbations, alpha=alpha)
+    return {naming.single(gene): fit["w"][fit["index"][gene]]
+            for gene in perturbations
+            if gene in fit["covered"] and gene not in trained_alone}
+
+
 def anchor_deltas(kind: str, stats: ConditionMeans, train_conditions: list[str],
                   conditions: list[str], alpha: float = 1.0) -> dict[str, np.ndarray]:
     """condition -> the GENE-SPACE shift applied to a control cell before transport.

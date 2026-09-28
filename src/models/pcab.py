@@ -98,33 +98,94 @@ class GeneWiseHurdleHead(HurdleHead):
     """Same as HurdleHead but reading a [B, G, d_v] tensor.
 
     A Flatten + Linear output layer would be G * K * d_v = 23.7 billion parameters
-    at the full gene set. A shared direction plus a per-gene bias is ~19 K, and
-    loses nothing: gene identity already lives in h, not in the projection.
+    at the full gene set, so the readout is low-rank instead: `rank` shared
+    directions in the d_value feature space, mixed per gene, plus a per-gene bias.
+
+    RANK 1 IS THE MEASURED CONFIGURATION AND IS WHERE A KNOWN RESIDUAL LIVES. At
+    rank 1 the whole gene space is read through a SINGLE direction, so every gene
+    shares one feature -> expression rule and the map can only rescale a gene, never
+    mix two. Two measurements say that is the binding constraint rather than a free
+    saving:
+
+      - a per-gene diagonal correction moves L2 by 0.05-0.16 and leaves cosine
+        unchanged, so the decoder's distortion is genes MIXING, which a per-gene
+        gain cannot address and a rank-1 readout cannot express;
+      - the ~950 genes outside the top-50 energy block score cosine 0.65 in every
+        run measured, against 0.90-0.94 inside it, AND 0.65 holds at the decoder
+        ceiling (true latents in) - so it is the readout, not the transport.
+
+    The earlier note here said a shared direction "loses nothing: gene identity
+    already lives in h". Identity does. The map from features to output does not.
+
+    Cost at rank R: R*d_value + G*R per channel, 81 K at R=16, G=5000, d_value=64,
+    against a 5.2 M encoder. Coefficient 0 starts at one and the rest at zero, so
+    any rank begins exactly as rank 1 does and a larger rank can only add. The
+    readout's own matmul is R times the rank-1 one, which is 0.2 GFLOP per channel
+    at batch 48 - not where this model spends time.
     """
 
+    CHANNELS = ("gate", "magnitude", "scale")
+
     def __init__(self, d_value: int, n_genes: int, bce_weight: float,
-                 gate_mode: str, magnitude_mode: str):
+                 gate_mode: str, magnitude_mode: str, rank: int = 1):
         nn.Module.__init__(self)
+        if rank < 1:
+            raise ValueError(f"head_rank must be >= 1, got {rank}")
         self.bce_weight = bce_weight
         self.gate_mode = gate_mode
         self.magnitude_mode = magnitude_mode
-        self.gate_w = nn.Parameter(torch.randn(d_value) * 0.02)
-        self.gate_b = nn.Parameter(torch.zeros(n_genes))
-        self.magnitude_w = nn.Parameter(torch.randn(d_value) * 0.02)
-        self.magnitude_b = nn.Parameter(torch.zeros(n_genes))
-        if magnitude_mode == "gaussian":
-            self.scale_w = nn.Parameter(torch.randn(d_value) * 0.02)
-            self.scale_b = nn.Parameter(torch.zeros(n_genes))
+        self.rank = rank
+        channels = self.CHANNELS if magnitude_mode == "gaussian" else self.CHANNELS[:2]
+        for name in channels:
+            directions = nn.Parameter(torch.randn(rank, d_value) * 0.02)
+            coefficients = nn.Parameter(torch.zeros(n_genes, rank))
+            with torch.no_grad():
+                coefficients[:, 0] = 1.0
+            self.register_parameter(f"{name}_w", directions)
+            self.register_parameter(f"{name}_c", coefficients)
+            self.register_parameter(f"{name}_b", nn.Parameter(torch.zeros(n_genes)))
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        """Accept a checkpoint written before the readout had a rank.
+
+        Those files store `<name>_w` as [d_value] and have no `<name>_c`, so a
+        strict load would fail on shape - which would block train.init_vae_from
+        from reusing any encoder trained so far, including the ones behind the
+        reported tables. The old readout IS this one at rank 1 with coefficient 1,
+        so the upgrade is exact rather than an approximation: reshape the direction
+        and fill the coefficients with the column this class initialises to one.
+        At rank > 1 the extra directions stay at their random initialisation and
+        the extra coefficients at zero, so the loaded head still starts as the
+        rank-1 head it was.
+        """
+        for name in self.CHANNELS:
+            weight_key, coefficient_key = f"{prefix}{name}_w", f"{prefix}{name}_c"
+            weight = state_dict.get(weight_key)
+            if weight is None or weight.dim() != 1:
+                continue
+            target = getattr(self, f"{name}_w", None)
+            if target is None:
+                continue
+            upgraded = target.detach().clone()
+            upgraded[0] = weight
+            state_dict[weight_key] = upgraded
+            if coefficient_key not in state_dict:
+                state_dict[coefficient_key] = getattr(self, f"{name}_c").detach().clone()
+        return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def _read(self, h: torch.Tensor, name: str) -> torch.Tensor:
+        """[B, G, d_v] -> [B, G]. sum_r c[g, r] * <h[b, g], w[r]> + b[g]."""
+        projected = h @ getattr(self, f"{name}_w").T          # [B, G, R]
+        return ((projected * getattr(self, f"{name}_c")).sum(-1)
+                + getattr(self, f"{name}_b"))
 
     def forward(self, h: torch.Tensor) -> dict[str, torch.Tensor]:
         params = {
-            "gate_logit": torch.einsum("bgd,d->bg", h, self.gate_w) + self.gate_b,
-            "magnitude": F.softplus(
-                torch.einsum("bgd,d->bg", h, self.magnitude_w) + self.magnitude_b),
+            "gate_logit": self._read(h, "gate"),
+            "magnitude": F.softplus(self._read(h, "magnitude")),
         }
         if self.magnitude_mode == "gaussian":
-            params["log_scale"] = (
-                torch.einsum("bgd,d->bg", h, self.scale_w) + self.scale_b).clamp(-6.0, 2.0)
+            params["log_scale"] = self._read(h, "scale").clamp(-6.0, 2.0)
         return params
 
 
@@ -189,7 +250,8 @@ class PCABBackbone(BaseBackbone):
         if head_kind == "hurdle":
             self.head = GeneWiseHurdleHead(d_value, n_genes, model_cfg["hurdle_bce_weight"],
                                            model_cfg["hurdle_gate"],
-                                           model_cfg["hurdle_magnitude"])
+                                           model_cfg["hurdle_magnitude"],
+                                           model_cfg.get("head_rank", 1))
         else:
             raise ValueError(f"decoder_head {head_kind!r} is not supported by pcab")
 
