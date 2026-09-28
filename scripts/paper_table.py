@@ -102,14 +102,16 @@ def celleval_means(run_dir: str, gate: str | None = None,
 
 
 def compute_l2(run_dir: str, device: str, n_cells: int, gate: str | None = None,
-               infer_top_gene: int | None = None, group: str = "double") -> float:
+               infer_top_gene: int | None = None, group: str = "double",
+               alpha: str | None = None) -> float:
     """Eq. (15) over the fold's test doubles - the same conditions resid_R2 uses.
 
     `infer_top_gene` restricts the gene space to the subset scDFM scores on, which
     is the only way the L2 columns compare: theirs is 1,000 scanpy-HVG genes of
     the test subset, ours is every gene in the cache.
     """
-    config, data, stats, fold, vae, field = load_run(run_dir, device, gate)
+    config, data, stats, fold, vae, field = load_run(run_dir, device, gate,
+                                                     alpha=alpha)
     rng = np.random.default_rng(config["eval"]["seed"])
     conditions = condition_groups(data, stats, fold, config["split"]["method"])
     genes = scdfm_eval_genes(data, fold, infer_top_gene) if infer_top_gene else None
@@ -127,6 +129,11 @@ def main() -> None:
     parser.add_argument("runs", nargs="*", default=None)
     parser.add_argument("--filter", default=None)
     parser.add_argument("--no-l2", action="store_true", help="skip the model pass")
+    parser.add_argument("--alpha", default=None, choices=("none", "mean", "cell"),
+                        help="post-hoc magnitude correction (eval.magnitude_alpha), "
+                             "fitted on this run's TRAINING conditions. Must be "
+                             "passed here for any checkpoint written before the "
+                             "option existed, which carries no such key.")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--n-cells", type=int, default=256)
     parser.add_argument("--infer-top-gene", type=int, default=None,
@@ -184,7 +191,7 @@ def main() -> None:
         values = celleval_means(run_dir, args.gate, args.group)
         l2 = (float("nan") if args.no_l2 else
               compute_l2(run_dir, args.device, args.n_cells, args.gate,
-                         args.infer_top_gene, args.group))
+                         args.infer_top_gene, args.group, args.alpha))
 
         cells = [f"{l2:12.4f}" if np.isfinite(l2) else f"{'-':>12s}"]
         record = {"run": name, "L2": l2}

@@ -68,7 +68,7 @@ def _folds(config: dict, method: str) -> list:
 
 
 def load_run(run_dir: str, device: str = "cpu", gate: str | None = None,
-             checkpoint_name: str = "checkpoint.pt"):
+             checkpoint_name: str = "checkpoint.pt", alpha: str | None = None):
     """Rebuild a finished run from its checkpoint.
 
     `checkpoint_name` selects which one. stage1.pt is written the moment stage 1
@@ -88,6 +88,13 @@ def load_run(run_dir: str, device: str = "cpu", gate: str | None = None,
     same weights and not a different model. Passing it here is what removes the
     need to copy a run directory and patch its checkpoint to compare gates.
 
+    `alpha` overrides eval.magnitude_alpha the same way and for the same reason:
+    the magnitude correction is fitted from the run's own predictions on its own
+    training conditions, appears in no training loss, and is applied after decoding.
+    It has to be passable HERE rather than read from the file, because a checkpoint
+    written before the option existed carries no such key and would silently score
+    uncorrected - which is every run behind the reported tables.
+
     The returned data and stats are SHARED between calls. Nothing here writes to
     them, but a caller that wants to mutate them must copy first.
     """
@@ -97,6 +104,8 @@ def load_run(run_dir: str, device: str = "cpu", gate: str | None = None,
     config["train"]["device"] = config["eval"]["device"] = device
     if gate:
         config["model"]["hurdle_gate"] = gate
+    if alpha:
+        config["eval"]["magnitude_alpha"] = alpha
 
     data, stats = _dataset(config)
     method = config["split"]["method"]

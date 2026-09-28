@@ -200,6 +200,11 @@ def main() -> None:
                              "is why this takes longer than the training does. "
                              "pdex already builds ONE shared matrix for workers "
                              "to read, so raising this does not raise /dev/shm.")
+    parser.add_argument("--alpha", default=None, choices=("none", "mean", "cell"),
+                        help="post-hoc magnitude correction (eval.magnitude_alpha), "
+                             "fitted on this run's TRAINING conditions. Required for "
+                             "any checkpoint written before the option existed: its "
+                             "config carries no such key and would score uncorrected.")
     parser.add_argument("--gate", default=None,
                         choices=["soft", "hard", "sample"],
                         help="override model.hurdle_gate for this scoring only. "
@@ -245,6 +250,9 @@ def main() -> None:
         if args.gate:
             config["model"]["hurdle_gate"] = args.gate
             print(f"hurdle gate overridden: {args.gate}")
+        if args.alpha:
+            config["eval"]["magnitude_alpha"] = args.alpha
+            print(f"magnitude alpha overridden: {args.alpha}")
         device = config["train"]["device"]
         if device == "cuda" and not torch.cuda.is_available():
             device = config["train"]["device"] = config["eval"]["device"] = "cpu"
