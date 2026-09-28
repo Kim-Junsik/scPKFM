@@ -221,7 +221,7 @@ def measure_transport(vae, field, data, stats, conditions: list[str], config,
     for condition in conditions:
         if condition == data.control_condition or not stats.has(condition):
             continue
-        cells = _control_sample(data, n_cells, rng)
+        cells = source = _control_sample(data, n_cells, rng)
         # Same shift predict_cells applies, so lat_ratio/gene_ratio describe the
         # displacement this model actually produces rather than the anchor's.
         shift = (getattr(field, "anchor_table", None) or {}).get(condition)
@@ -240,7 +240,16 @@ def measure_transport(vae, field, data, stats, conditions: list[str], config,
 
         origin = z0.mean(dim=0)
         predicted = vae.reconstruction(vae.decode_z(z1_hat), **_head_aux(vae, x0))
-        gene_hat = _numpy(predicted.mean(dim=0))
+        # This function does NOT go through predict_cells - it integrates and decodes
+        # here - so the magnitude correction has to be applied explicitly. Without
+        # this line paper_table.py --alpha printed an L2 identical to the
+        # uncorrected one, which reads as "the correction does nothing" rather than
+        # "the correction was never applied". `source` and not `cells`: the
+        # displacement is measured from the control population, and under an anchor
+        # `cells` already carries part of that displacement.
+        gene_matrix = predict.apply_alpha(_numpy(predicted), source,
+                                          getattr(field, "magnitude_alpha", None))
+        gene_hat = gene_matrix.mean(axis=0)
         gene_true = stats.mean[condition]
         control_mean = stats.control
         if genes is not None:
