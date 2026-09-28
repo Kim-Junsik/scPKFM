@@ -181,6 +181,21 @@ if __name__ == "__main__":
 '''
 
 
+def celleval_dir(gate: str | None, alpha: str | None) -> str:
+    """The export folder for one (gate, alpha) reading of a checkpoint.
+
+    scripts/paper_table.py imports THIS function rather than rebuilding the name,
+    because a reader that disagrees with the writer reports "no cell-eval yet" for
+    an export sitting on disk, or worse joins one reading's L2 to another's columns.
+    alpha=none keeps the historical name so exports made before the option existed
+    still resolve.
+    """
+    name = "celleval" if not gate else f"celleval_{gate}"
+    if alpha and alpha != "none":
+        name = f"{name}_a{alpha}"
+    return name
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -223,8 +238,11 @@ def main() -> None:
                              "condition, so the full export is slow to score")
     args = parser.parse_args()
 
-    out_dir = os.path.join(args.run_dir,
-                           "celleval" if not args.gate else f"celleval_{args.gate}")
+    # The gate AND the magnitude correction go in the folder name. Both change the
+    # predictions this export holds, so an export made under one must never
+    # overwrite an export made under another - that would destroy the uncorrected
+    # baseline the corrected run is being compared against, silently.
+    out_dir = os.path.join(args.run_dir, celleval_dir(args.gate, args.alpha))
     interpreter = None
     if not args.export_only:
         # Resolved and probed BEFORE the export, so a broken environment costs

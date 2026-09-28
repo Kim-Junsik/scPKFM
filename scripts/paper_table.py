@@ -39,6 +39,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from src.eval.diagnostics import (condition_groups, load_run, measure_transport,
                                   scdfm_eval_genes)
+# The export folder's name comes from the script that WRITES it, never rebuilt here.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from run_celleval import celleval_dir
 
 # (column in agg_results.csv, header, higher-is-better). ASCII headers on purpose:
 # a Korean Windows console is cp949 and mangles the arrows and greek the paper uses.
@@ -53,12 +56,14 @@ NOT_COMPUTABLE = ["Pears_dhat", "Pears_dhat20"]
 
 
 def celleval_means(run_dir: str, gate: str | None = None,
-                   group: str = "double") -> dict[str, str] | None:
+                   group: str = "double",
+                   alpha: str | None = None) -> dict[str, str] | None:
     """Reads the scoring produced under the SAME gate the L2 pass will use.
 
-    run_celleval.py writes to celleval_<gate>/ when given --gate, so mixing a
-    soft L2 with a sample cell-eval - five of the eight columns silently coming
-    from a different point estimate - is not expressible here.
+    run_celleval.py writes to celleval_<gate>[_a<alpha>]/, and the name is built by
+    ITS OWN celleval_dir, imported here rather than rebuilt - so mixing a soft L2
+    with a sample cell-eval, or a corrected L2 with uncorrected columns (five of the
+    eight silently coming from different predictions), is not expressible.
 
     Averaged from the per-condition results.csv rather than read off
     agg_results.csv, because the aggregate cannot be split. Under the
@@ -71,8 +76,7 @@ def celleval_means(run_dir: str, gate: str | None = None,
     The two agree exactly when nothing is filtered: checked on an additive run,
     all five metrics identical to 1e-16.
     """
-    folder = "celleval" if not gate else f"celleval_{gate}"
-    path = os.path.join(run_dir, folder, "results.csv")
+    path = os.path.join(run_dir, celleval_dir(gate, alpha), "results.csv")
     if not os.path.exists(path):
         return None
     # celleval labels a double 'A+B' and a single 'A' (celleval.to_celleval_label),
@@ -188,7 +192,7 @@ def main() -> None:
     table = []
     for run_dir in runs:
         name = os.path.basename(run_dir.rstrip("/\\"))
-        values = celleval_means(run_dir, args.gate, args.group)
+        values = celleval_means(run_dir, args.gate, args.group, args.alpha)
         l2 = (float("nan") if args.no_l2 else
               compute_l2(run_dir, args.device, args.n_cells, args.gate,
                          args.infer_top_gene, args.group, args.alpha))
