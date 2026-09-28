@@ -195,6 +195,21 @@ def _cosine(predicted, true) -> float:
     return float(predicted @ true) / scale if scale else float("nan")
 
 
+@torch.no_grad()
+def _encode_chunked(vae, cells: np.ndarray, device: str, chunk: int) -> torch.Tensor:
+    """encode_z over `cells`, in chunks, standardised latents concatenated.
+
+    P-CAB's encode materialises [B, K, G] scores plus a softmax of the same shape,
+    which at 1,024 cells, K = 359 and G = 5,032 is 10.8 GiB in ONE allocation - the
+    largest in the pipeline, and it does not fit beside a training run. The same
+    argument already chunks backbones.fit_latent_scale and
+    loop.condition_mean_latents; the scoring paths were the ones left unchunked.
+    """
+    return torch.cat([vae.encode_z(torch.as_tensor(cells[start:start + chunk],
+                                                   device=device))[0]
+                      for start in range(0, cells.shape[0], max(chunk, 1))], dim=0)
+
+
 def _control_sample(data, n_cells: int, rng) -> np.ndarray:
     cells = data.cells(data.control_condition)
     pick = rng.choice(cells.shape[0], size=min(n_cells, cells.shape[0]), replace=False)
@@ -204,7 +219,8 @@ def _control_sample(data, n_cells: int, rng) -> np.ndarray:
 @torch.no_grad()
 def measure_transport(vae, field, data, stats, conditions: list[str], config,
                       rng, device: str, n_cells: int,
-                      genes: np.ndarray | None = None) -> list[dict]:
+                      genes: np.ndarray | None = None,
+                      chunk: int = 256) -> list[dict]:
     """How far, and in which direction, the field actually carries the cells.
 
     Reported as a ratio against the true displacement rather than as an error,
@@ -227,8 +243,7 @@ def measure_transport(vae, field, data, stats, conditions: list[str], config,
         shift = (getattr(field, "anchor_table", None) or {}).get(condition)
         if shift is not None:
             cells = cells + shift.astype(cells.dtype, copy=False)
-        x0 = torch.as_tensor(cells, device=device)
-        z0, _ = vae.encode_z(x0)
+        z0 = _encode_chunked(vae, cells, device, chunk)
 
         perturbations = [data.pert_index[g] for g in data.naming.genes(condition)]
         z1_hat = integrate(field, z0, perturbations, n_steps)
@@ -236,10 +251,12 @@ def measure_transport(vae, field, data, stats, conditions: list[str], config,
         true_cells = data.cells(condition)
         take = rng.choice(true_cells.shape[0],
                           size=min(n_cells, true_cells.shape[0]), replace=False)
-        z1_true, _ = vae.encode_z(torch.as_tensor(true_cells[take], device=device))
+        z1_true = _encode_chunked(vae, true_cells[take], device, chunk)
 
         origin = z0.mean(dim=0)
-        predicted = vae.reconstruction(vae.decode_z(z1_hat), **_head_aux(vae, x0))
+        predicted = torch.cat([vae.reconstruction(vae.decode_z(z1_hat[s:s + chunk]),
+                                                  **_head_aux(vae, None))
+                               for s in range(0, z1_hat.shape[0], chunk)], dim=0)
         # This function does NOT go through predict_cells - it integrates and decodes
         # here - so the magnitude correction has to be applied explicitly. Without
         # this line paper_table.py --alpha printed an L2 identical to the

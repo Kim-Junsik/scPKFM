@@ -46,7 +46,8 @@ def autoencode(vae, cells: np.ndarray, device: str) -> np.ndarray:
 def predict_cells(vae, field, control_cells: np.ndarray, condition: str,
                   pert_index: dict[str, int], n_steps: int,
                   device: str, naming, anchor: dict | None = None,
-                  alpha: tuple[str, float] | None = None) -> np.ndarray:
+                  alpha: tuple[str, float] | None = None,
+                  chunk: int = 256) -> np.ndarray:
     """`naming` parses the condition; `anchor` is eval.baselines.anchor_deltas.
 
     naming is positional and has no default on purpose. It used to fall back to
@@ -72,6 +73,20 @@ def predict_cells(vae, field, control_cells: np.ndarray, condition: str,
     rides the same choke point and the same `field.<attr>` fallback for the same
     reason, so every scoring path gets it or none does. Pass ("none", 1.0) to force
     raw predictions, which is what fit_alpha needs.
+
+    `chunk` bounds the transport's peak memory. P-CAB's encode materialises
+    [B, K, G] scores and a softmax of the same shape, which at 1,024 cells,
+    K = 359 tokens and G = 5,032 genes is 10.8 GiB in one allocation - the largest
+    in the whole pipeline, and it does not fit next to a training run. The same
+    argument already chunks backbones.fit_latent_scale and
+    loop.condition_mean_latents; this path was the one left unchunked, and it is the
+    one every scoring script goes through.
+
+    Cells are transported independently, so chunking is exact under the soft and
+    hard gates. Under gate=sample it changes which random draws land on which cell -
+    the population statistics are unaffected, but a run is only bit-reproducible at
+    a fixed chunk size. alpha is applied AFTER the chunks are joined, because
+    mode=mean is a statement about the whole predicted population.
     """
     vae.eval()
     field.eval()
@@ -82,11 +97,14 @@ def predict_cells(vae, field, control_cells: np.ndarray, condition: str,
     shift = (anchor or {}).get(condition)
     if shift is not None:
         control_cells = control_cells + shift.astype(control_cells.dtype, copy=False)
-    x0 = torch.as_tensor(control_cells, device=device)
-    z0, _ = vae.encode_z(x0)
-    z1 = integrate(field, z0, perturbations, n_steps)
-    predicted = vae.reconstruction(vae.decode_z(z1),
-                                  **_head_aux(vae, x0)).cpu().numpy()
+    pieces = []
+    for start in range(0, control_cells.shape[0], max(chunk, 1)):
+        x0 = torch.as_tensor(control_cells[start:start + chunk], device=device)
+        z0, _ = vae.encode_z(x0)
+        z1 = integrate(field, z0, perturbations, n_steps)
+        pieces.append(vae.reconstruction(vae.decode_z(z1),
+                                         **_head_aux(vae, x0)).cpu().numpy())
+    predicted = pieces[0] if len(pieces) == 1 else np.concatenate(pieces, axis=0)
     if alpha is None:
         alpha = getattr(field, "magnitude_alpha", None)
     # `source` and not `control_cells`: the displacement alpha corrects is measured
