@@ -131,6 +131,17 @@ def main() -> None:
                         help="score on the scanpy-HVG genes of the test subset, as "
                              "the reported tables do. 0 uses every modelled gene, "
                              "which is NOT the reported protocol.")
+    parser.add_argument("--fallback", default="skip", choices=("skip", "control"),
+                        help="what to do with a condition the baseline cannot "
+                             "predict. skip drops it, so the row is a mean over "
+                             "FEWER conditions than the models are scored on and "
+                             "the two numbers do not compare. control predicts the "
+                             "control mean instead, which is what a model does for "
+                             "the same conditions anyway: a perturbation with no "
+                             "training condition keeps its zero-initialised "
+                             "operator and transports nothing (10-15 % of Table 2's "
+                             "Single block). Use control to put a baseline in the "
+                             "same table as a model.")
     parser.add_argument("--per-condition", action="store_true",
                         help="also print each condition's L2")
     parser.add_argument("--csv", default=None)
@@ -175,7 +186,9 @@ def main() -> None:
             m_hat = predict_any(name, condition, stats, available, scale, ridge, pairwise)
             if m_hat is None:
                 skipped.append(condition)
-                continue
+                if args.fallback != "control":
+                    continue
+                m_hat = stats.control
             truth, predicted = stats.mean[condition], m_hat
             if genes is not None:
                 truth, predicted = truth[genes], predicted[genes]
@@ -192,8 +205,12 @@ def main() -> None:
     for r in rows:
         value = f"{r['L2']:9.4f}" if np.isfinite(r["L2"]) else f"{'-':>9}"
         print(f"{r['baseline']:{width}s} {value} {r['n']:4d} {r['skipped']:8d}")
-    print("\nlower is better. 'skipped' = conditions the baseline cannot predict "
-          "without\nreading the held-out condition itself; they are NOT filled in.")
+    filled = ("predicted as the CONTROL mean, so n matches the models"
+              if args.fallback == "control" else
+              "NOT filled in, so n is smaller than the models' and the rows do not "
+              "compare;\n            re-run with --fallback control for that")
+    print(f"\nlower is better. 'skipped' = conditions the baseline cannot predict "
+          f"without\nreading the held-out condition itself. They are {filled}.")
 
     control = next(r for r in rows if r["baseline"] == "control")
     print(f"\nscale check: control L2 = {control['L2']:.4f}. This is the distance from "
